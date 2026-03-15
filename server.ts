@@ -1261,11 +1261,30 @@ async function getIgdbToken() {
         }
         
         if (matchedTitle && titleId) {
+          // Extract fields from TitleHub API structure (decoration/detail nests things differently)
+          const th = matchedTitle.titleHistory || matchedTitle.history;
+          const playtime = th && typeof th.minutesPlayed === 'number' ? th.minutesPlayed
+            : typeof matchedTitle.minutesPlayed === 'number' ? matchedTitle.minutesPlayed : 0;
+          let artwork = matchedTitle.displayImage || matchedTitle.image || '';
+          if (matchedTitle.mediaAssets?.length) {
+            const pref = matchedTitle.mediaAssets.find((m: any) =>
+              ['BoxArt','Poster','SquareBoxArt','BrandedKeyArt','SuperHeroArt'].includes(m.type)
+            ) || matchedTitle.mediaAssets[0];
+            if (pref?.url) artwork = pref.url;
+          }
+          const detailGenres: string[] = matchedTitle.detail?.genres || matchedTitle.genres || [];
+          const description = matchedTitle.detail?.shortDescription || matchedTitle.description || '';
+          const rawReleaseDate = matchedTitle.detail?.releaseDate || matchedTitle.releaseDate || '';
+          // Format ISO date to human-readable (e.g. "Feb 10, 2023") like Steam does
+          const releaseDate = rawReleaseDate && /^\d{4}-\d{2}-\d{2}T/.test(rawReleaseDate)
+            ? (() => { try { return new Date(rawReleaseDate).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }); } catch { return rawReleaseDate; } })()
+            : rawReleaseDate;
+
           // Check if game already exists
           const existing = db.prepare(
             "SELECT id FROM launcher_games WHERE user_id = ? AND platform = 'xbox' AND external_id = ?"
           ).get(req.user.id, titleId);
-          
+
           if (!existing) {
             // Get achievements for this title
             const achs = achievementsByTitle.get(titleId) || [];
@@ -1276,7 +1295,7 @@ async function getIgdbToken() {
               unlocked: a.progressState === 'Achieved' || a.progression?.state === 'Achieved' || (!!a.progression?.timeUnlocked && new Date(a.progression.timeUnlocked).getTime() > 0) || a.isUnlocked || false,
               unlockTime: (() => { const t = a.progression?.timeUnlocked || a.timeUnlocked; if (!t) return null; const ms = new Date(t).getTime(); return (isNaN(ms) || ms <= 0) ? null : Math.floor(ms / 1000); })()
             })));
-            
+
             // Add the game with full Xbox data
             db.prepare(`
               INSERT INTO launcher_games
@@ -1286,19 +1305,19 @@ async function getIgdbToken() {
               matchedTitle.name,
               titleId,
               req.user.id,
-              matchedTitle.secondsPlayed || matchedTitle.minutesPlayed || 0,
+              playtime,
               achievementsJson,
-              matchedTitle.image || '',
-              matchedTitle.heroImage || '',
-              matchedTitle.icon || '',
-              matchedTitle.description || '',
-              matchedTitle.genres?.join(',') || '',
-              matchedTitle.genres?.[0] || '',
-              matchedTitle.releaseDate || ''
+              artwork,
+              artwork,
+              artwork,
+              description,
+              detailGenres.join(','),
+              detailGenres[0] || '',
+              releaseDate
             );
-            
+
             addedCount++;
-            console.log(`✅ Added Xbox game: ${matchedTitle.name} (local: ${localGameName})`);
+            console.log(`✅ Added Xbox game: ${matchedTitle.name} (local: ${localGameName}, playtime: ${playtime}m)`);
           } else {
             // Mark existing game as installed and update with latest data
             const achs = achievementsByTitle.get(titleId) || [];
@@ -1309,21 +1328,21 @@ async function getIgdbToken() {
               unlocked: a.progressState === 'Achieved' || a.progression?.state === 'Achieved' || (!!a.progression?.timeUnlocked && new Date(a.progression.timeUnlocked).getTime() > 0) || a.isUnlocked || false,
               unlockTime: (() => { const t = a.progression?.timeUnlocked || a.timeUnlocked; if (!t) return null; const ms = new Date(t).getTime(); return (isNaN(ms) || ms <= 0) ? null : Math.floor(ms / 1000); })()
             })));
-            
+
             db.prepare(`
-              UPDATE launcher_games 
+              UPDATE launcher_games
               SET installed = 1, playtime = ?, achievements = ?, artwork = ?, banner = ?, logo = ?, description = ?, tags = ?, genre = ?, release_date = ?
               WHERE id = ?
             `).run(
-              matchedTitle.secondsPlayed || 0,
+              playtime,
               achievementsJson,
-              matchedTitle.image || '',
-              matchedTitle.heroImage || '',
-              matchedTitle.icon || '',
-              matchedTitle.description || '',
-              matchedTitle.genres?.join(',') || '',
-              matchedTitle.genres?.[0] || '',
-              matchedTitle.releaseDate || '',
+              artwork,
+              artwork,
+              artwork,
+              description,
+              detailGenres.join(','),
+              detailGenres[0] || '',
+              releaseDate,
               existing.id
             );
             
@@ -1758,7 +1777,7 @@ async function getIgdbToken() {
         const execAsync = promisify(exec);
         
         try {
-          const steamCmd = 'powershell -NoProfile -Command "Get-ChildItem -Path \"C:\\Program Files (x86)\\Steam\\steamapps\" -Filter \"*.acf\" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name | ForEach-Object { $_ -replace \"\\.acf$\", \"\" } | Where-Object { $_ -notmatch \"^common_\" -and $_ -notmatch \"^workshop_\" }"';
+          const steamCmd = 'powershell -NoProfile -Command "Get-ChildItem -Path \"C:\\Program Files (x86)\\Steam\\steamapps\" -Filter \"appmanifest_*.acf\" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name | ForEach-Object { $_ -replace \"^appmanifest_\", \"\" -replace \"\\.acf$\", \"\" } | Where-Object { $_ -match \"^\\d+$\" }"';
           const { stdout: steamOut } = await execAsync(steamCmd, { timeout: 10000 });
           
           if (steamOut?.trim()) {
@@ -2086,28 +2105,90 @@ async function getIgdbToken() {
                     }
                   }
                 );
+                console.log(`Xbox friends PeopleHub status: ${peopleRes.status}`);
                 if (peopleRes.ok) {
                   const peopleData = await peopleRes.json();
-                  // titleId for this game (numeric string from Xbox API, or null if folder-name fallback)
-                  const titleId = game.external_id && game.external_id !== game.title ? String(game.external_id) : null;
+                  const people = peopleData.people || [];
+                  console.log(`Xbox friends: ${people.length} people returned`);
 
-                  for (const person of peopleData.people || []) {
+                  // titleId for this game — external_id is numeric when matched via Xbox API
+                  const titleId = game.external_id && !isNaN(Number(game.external_id)) ? String(game.external_id) : null;
+                  console.log(`Xbox friends: checking ${people.length} friends for titleId=${titleId}`);
+
+                  const xblHeaders = {
+                    'x-xbl-contract-version': '2',
+                    'Authorization': `XBL3.0 x=${userHash};${xstsToken}`,
+                    'Accept-Language': 'en-US',
+                    'Accept': 'application/json'
+                  };
+
+                  // For each friend, check their title history to see if they've played this game
+                  const friendChecks = people.map(async (person: any) => {
                     const isOnline = person.presenceState === 'Online';
-                    const activeTitle = (person.presenceDetails || []).find((d) => d.IsGame);
+                    const activeTitle = (person.presenceDetails || []).find((d: any) => d.IsGame);
                     const presenceTitleId = activeTitle?.TitleId ? String(activeTitle.TitleId) : null;
                     const isPlayingThis = !!(titleId && presenceTitleId && presenceTitleId === titleId);
 
-                    // Only include online friends or those who are playing this exact game
-                    if (isOnline || isPlayingThis) {
-                      results.push({
+                    if (isPlayingThis) {
+                      return {
                         username: person.gamertag,
                         avatar: person.displayPicRaw || null,
-                        online_status: isPlayingThis ? 'in_game' : (isOnline ? 'online' : 'offline'),
+                        online_status: 'in_game',
                         current_game: activeTitle?.PresenceText || null,
                         platform: 'xbox'
-                      });
+                      };
                     }
-                  }
+
+                    if (!titleId || !person.xuid) {
+                      // No titleId to check or no xuid — only include if online
+                      if (isOnline) {
+                        return {
+                          username: person.gamertag,
+                          avatar: person.displayPicRaw || null,
+                          online_status: 'online',
+                          current_game: activeTitle?.PresenceText || null,
+                          platform: 'xbox'
+                        };
+                      }
+                      return null;
+                    }
+
+                    // Check friend's title history via TitleHub
+                    try {
+                      const friendThRes = await fetch(
+                        `https://titlehub.xboxlive.com/users/xuid(${person.xuid})/titles/titlehistory/decoration/detail`,
+                        { headers: xblHeaders }
+                      );
+                      if (!friendThRes.ok) {
+                        console.log(`TitleHub for ${person.gamertag}: ${friendThRes.status}`);
+                        return null;
+                      }
+                      const friendThData = await friendThRes.json();
+                      const matchingTitle = (friendThData.titles || []).find(
+                        (t: any) => String(t.titleId) === titleId
+                      );
+                      if (!matchingTitle) return null;
+
+                      const lastPlayedIso = matchingTitle.titleHistory?.lastTimePlayed;
+                      const lastPlayedTs = lastPlayedIso ? Math.floor(new Date(lastPlayedIso).getTime() / 1000) : null;
+                      console.log(`${person.gamertag} has played titleId=${titleId}, last: ${lastPlayedIso}`);
+                      return {
+                        username: person.gamertag,
+                        avatar: person.displayPicRaw || null,
+                        online_status: isOnline ? 'online' : 'offline',
+                        current_game: isOnline ? (activeTitle?.PresenceText || null) : null,
+                        last_played: lastPlayedTs,
+                        platform: 'xbox'
+                      };
+                    } catch (e) {
+                      console.error(`TitleHub check for ${person.gamertag}:`, e);
+                      return null;
+                    }
+                  });
+
+                  results.push(...(await Promise.all(friendChecks)).filter(Boolean));
+                } else {
+                  console.error(`Xbox friends PeopleHub error: ${peopleRes.status} ${await peopleRes.text().catch(() => '')}`);
                 }
               }
             }
@@ -2176,14 +2257,16 @@ async function getIgdbToken() {
         }
       }
 
-      // Fetch ALL tags from IGDB for all platforms if missing
-      if (!tags) {
+      // Fetch tags/description/genre from IGDB for all platforms if any are missing
+      if (!tags || !description || !genre) {
         try {
           const igdbRes = await fetch(`http://localhost:3000/api/igdb/search?title=${encodeURIComponent(game.title)}`);
           if (igdbRes.ok) {
             const igdbData = await igdbRes.text().then(t => t ? JSON.parse(t) : {}).catch(() => ({}));
-            if (igdbData && igdbData.tags) {
-              tags = igdbData.tags;
+            if (igdbData) {
+              if (!tags && igdbData.tags) tags = igdbData.tags;
+              if (!description && igdbData.description) description = igdbData.description;
+              if (!genre && igdbData.genre) genre = igdbData.genre;
             }
           }
         } catch (e) {
@@ -2368,21 +2451,79 @@ async function getIgdbToken() {
         }
       }
 
-      // Fetch logo from SteamgridDB if missing
-      if (!logo && game.platform === 'steam') {
-        const sgdbKey = process.env.STEAMGRIDDB_API_KEY;
-        if (sgdbKey) {
-          const logoRes = await fetch(`https://www.steamgriddb.com/api/v2/logos/steam/${game.external_id}`, {
-            headers: { Authorization: `Bearer ${sgdbKey}` }
-          });
-          const logoData = await logoRes.text().then(t => t ? JSON.parse(t) : {}).catch(() => ({}));
-          if (logoData.success && logoData.data && logoData.data.length > 0) {
-            const whiteLogos = logoData.data.filter((l) => l.style === 'white' || l.style === 'custom');
-            const targetList = whiteLogos.length > 0 ? whiteLogos : logoData.data;
-            const horizontal = [...targetList].sort((a, b) => (b.width / b.height) - (a.width / a.height))[0];
-            logo = horizontal.url;
+      // Fetch artwork/logo from SteamgridDB if missing
+      const sgdbKeyDetails = process.env.STEAMGRIDDB_API_KEY;
+      if (sgdbKeyDetails && (game.platform === 'steam' || game.platform === 'xbox')) {
+        let artwork = game.artwork;
+        let banner = game.banner;
+        try {
+          let sgdbGameId: string | null = null;
+
+          if (game.platform === 'steam') {
+            // Steam: use appid endpoints directly
+            if (!logo) {
+              const logoRes = await fetch(`https://www.steamgriddb.com/api/v2/logos/steam/${game.external_id}`, {
+                headers: { Authorization: `Bearer ${sgdbKeyDetails}` }
+              });
+              const logoData = await logoRes.text().then(t => t ? JSON.parse(t) : {}).catch(() => ({}));
+              if (logoData.success && logoData.data?.length > 0) {
+                const whiteLogos = logoData.data.filter((l) => l.style === 'white' || l.style === 'custom');
+                const targetList = whiteLogos.length > 0 ? whiteLogos : logoData.data;
+                logo = [...targetList].sort((a, b) => (b.width / b.height) - (a.width / a.height))[0]?.url;
+              }
+            }
+          } else if (game.platform === 'xbox' && (!logo || !artwork || !banner)) {
+            // Xbox: search by title name first
+            const searchRes = await fetch(`https://www.steamgriddb.com/api/v2/search/autocomplete/${encodeURIComponent(game.title)}`, {
+              headers: { Authorization: `Bearer ${sgdbKeyDetails}` }
+            });
+            const searchData = await searchRes.text().then(t => t ? JSON.parse(t) : {}).catch(() => ({}));
+            if (searchData.success && searchData.data?.length > 0) {
+              sgdbGameId = String(searchData.data[0].id);
+            }
+
+            if (sgdbGameId) {
+              if (!logo) {
+                const logoRes = await fetch(`https://www.steamgriddb.com/api/v2/logos/game/${sgdbGameId}`, {
+                  headers: { Authorization: `Bearer ${sgdbKeyDetails}` }
+                });
+                const logoData = await logoRes.text().then(t => t ? JSON.parse(t) : {}).catch(() => ({}));
+                if (logoData.success && logoData.data?.length > 0) {
+                  const whiteLogos = logoData.data.filter((l) => l.style === 'white' || l.style === 'custom');
+                  const targetList = whiteLogos.length > 0 ? whiteLogos : logoData.data;
+                  logo = [...targetList].sort((a, b) => (b.width / b.height) - (a.width / a.height))[0]?.url;
+                }
+              }
+              if (!artwork) {
+                const gridRes = await fetch(`https://www.steamgriddb.com/api/v2/grids/game/${sgdbGameId}?dimensions=600x900,342x482,660x930`, {
+                  headers: { Authorization: `Bearer ${sgdbKeyDetails}` }
+                });
+                const gridData = await gridRes.text().then(t => t ? JSON.parse(t) : {}).catch(() => ({}));
+                if (gridData.success && gridData.data?.length > 0) artwork = gridData.data[0].url;
+              }
+              if (!banner) {
+                const heroRes = await fetch(`https://www.steamgriddb.com/api/v2/heroes/game/${sgdbGameId}`, {
+                  headers: { Authorization: `Bearer ${sgdbKeyDetails}` }
+                });
+                const heroData = await heroRes.text().then(t => t ? JSON.parse(t) : {}).catch(() => ({}));
+                if (heroData.success && heroData.data?.length > 0) banner = heroData.data[0].url;
+              }
+              // Update artwork/banner in DB if they were fetched
+              if (artwork !== game.artwork || banner !== game.banner) {
+                db.prepare("UPDATE launcher_games SET artwork = ?, banner = ? WHERE id = ?").run(artwork || game.artwork, banner || game.banner, id);
+              }
+            }
           }
+        } catch (e) {
+          console.error(`SteamgridDB fetch error for ${game.title}:`, e);
         }
+      }
+
+      // Format Xbox release dates from ISO string to human-readable (e.g. "Feb 10, 2023")
+      if (game.platform === 'xbox' && release_date && /^\d{4}-\d{2}-\d{2}T/.test(release_date)) {
+        try {
+          release_date = new Date(release_date).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+        } catch { /* keep original */ }
       }
 
       // Normalize unlockTime: null out negative timestamps (0001-01-01 null date from Xbox API)
@@ -2538,8 +2679,8 @@ async function getIgdbToken() {
       console.log('🔍 Scanning Steam games...');
       
       // PowerShell command to get Steam games from library folders
-      const steamCmd = 'powershell -NoProfile -Command "Get-ChildItem -Path \"C:\\Program Files (x86)\\Steam\\steamapps\" -Filter \"*.acf\" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name | ForEach-Object { $_ -replace \"\\.acf$\", \"\" } | Where-Object { $_ -notmatch \"^common_\" -and $_ -notmatch \"^workshop_\" }"';
-      
+      const steamCmd = 'powershell -NoProfile -Command "Get-ChildItem -Path \"C:\\Program Files (x86)\\Steam\\steamapps\" -Filter \"appmanifest_*.acf\" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name | ForEach-Object { $_ -replace \"^appmanifest_\", \"\" -replace \"\\.acf$\", \"\" } | Where-Object { $_ -match \"^\\d+$\" }"';
+
       const { stdout: steamOut, stderr: steamErr } = await execAsync(steamCmd, { timeout: 10000 });
       
       console.log('Steam PowerShell stdout:', JSON.stringify(steamOut));

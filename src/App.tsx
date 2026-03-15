@@ -480,20 +480,39 @@ export default function App() {
         }
       };
       
+      // Track whether auth message was received so checkClosed doesn't
+      // call setIsSyncing(false) while the async sync is still running.
+      let authReceived = false;
+      const markAuthReceived = () => { authReceived = true; };
+
+      // Patch handleMessage to mark auth received before doing the sync
+      const patchedHandleMessage = async (event: MessageEvent) => {
+        if (event.data?.type === 'XBOX_AUTH_SUCCESS' || event.data?.type === 'XBOX_AUTH_ERROR') {
+          markAuthReceived();
+          clearInterval(checkClosed);
+        }
+        return handleMessage(event);
+      };
+      window.removeEventListener('message', handleMessage);
+      window.addEventListener('message', patchedHandleMessage);
+
       const checkClosed = setInterval(() => {
         if (authWindow?.closed) {
+          clearInterval(checkClosed);
+          cleanup();
+          // Only reset syncing state if auth message never arrived (user cancelled)
+          if (!authReceived) setIsSyncing(false);
+        }
+      }, 1000);
+
+      setTimeout(() => {
+        if (!authReceived) {
           cleanup();
           clearInterval(checkClosed);
           setIsSyncing(false);
         }
-      }, 1000);
-      
-      setTimeout(() => {
-        cleanup();
-        clearInterval(checkClosed);
-        setIsSyncing(false);
       }, 300000); // 5 minute timeout
-      
+
     } catch (error: any) {
       console.error('Xbox auth error:', error);
       setSyncMessage({
@@ -664,22 +683,17 @@ export default function App() {
       if (!event.origin.endsWith('.run.app') && !event.origin.includes('localhost')) {
         return;
       }
-      
-      if (event.data?.type ==='XBOX_AUTH_SUCCESS') {
-        setUser(prev => prev ? { ...prev, xbox_id: event.data.xuid } : null);
-        alert('Xbox profile linked successfully!');
-        fetchHomeData();
-      } else if (event.data?.type ==='XBOX_AUTH_ERROR') {
-        handleSyncXbox();
-      } else if (event.data?.type ==='DISCORD_AUTH_SUCCESS') {
+      // Xbox auth messages are handled directly inside handleSyncXbox / handleSyncXboxFull
+      // to avoid double-processing and stale alert() calls.
+      if (event.data?.type ==='DISCORD_AUTH_SUCCESS') {
         setUser(prev => prev ? { ...prev, discord_id: event.data.discordId } : null);
-        alert('Discord profile linked successfully!');
+        setSyncMessage({ title: 'Discord Connected', message: 'Your Discord account has been linked successfully.', type: 'success' });
         fetchHomeData();
       } else if (event.data?.type ==='DISCORD_AUTH_ERROR') {
-        alert(`Discord connection failed: ${event.data.error}`);
+        setSyncMessage({ title: 'Discord Connection Failed', message: event.data.error || 'Authentication failed. Please try again.', type: 'error' });
       }
     };
-    
+
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
   }, []);
@@ -895,29 +909,39 @@ export default function App() {
         }
       };
       
-      window.addEventListener('message', handleMessage);
-      
+      let authReceived2 = false;
+      const patchedHandleMessage2 = async (event: MessageEvent) => {
+        if (event.data?.type === 'XBOX_AUTH_SUCCESS' || event.data?.type === 'XBOX_AUTH_ERROR') {
+          authReceived2 = true;
+          clearInterval(checkClosed2);
+        }
+        return handleMessage(event);
+      };
+      window.addEventListener('message', patchedHandleMessage2);
+
       const cleanup = () => {
-        window.removeEventListener('message', handleMessage);
+        window.removeEventListener('message', patchedHandleMessage2);
         if (authWindow && !authWindow.closed) {
           authWindow.close();
         }
       };
-      
-      const checkClosed = setInterval(() => {
+
+      const checkClosed2 = setInterval(() => {
         if (authWindow?.closed) {
+          clearInterval(checkClosed2);
           cleanup();
-          clearInterval(checkClosed);
-          setIsSyncing(false);
+          if (!authReceived2) setIsSyncing(false);
         }
       }, 1000);
-      
+
       setTimeout(() => {
-        cleanup();
-        clearInterval(checkClosed);
-        setIsSyncing(false);
+        if (!authReceived2) {
+          cleanup();
+          clearInterval(checkClosed2);
+          setIsSyncing(false);
+        }
       }, 300000); // 5 minute timeout
-      
+
     } catch (error: any) {
       console.error('Xbox auth error:', error);
       setSyncMessage({
@@ -2967,7 +2991,7 @@ export default function App() {
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
             {/* Backdrop */}
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              onClick={() => { setSelectedGame(null); setFriendsWhoOwn([]); setIsEditingArtwork(false); setShowFriendsModal(false); }}
+              onClick={() => { setSelectedGame(null); setFriendsWhoOwn([]); setIsEditingArtwork(false); setIsEditingTags(false); setShowFriendsModal(false); setShowAchievementsModal(false); setConfirmDelete(null); }}
               className="absolute inset-0 bg-black/80"/>
 
             <motion.div
@@ -3043,7 +3067,7 @@ export default function App() {
 
                 {/* Close button — always on top */}
                 <button
-                  onClick={() => { setSelectedGame(null); setFriendsWhoOwn([]); setIsEditingTags(false); setIsEditingArtwork(false); setShowFriendsModal(false); }}
+                  onClick={() => { setSelectedGame(null); setFriendsWhoOwn([]); setIsEditingTags(false); setIsEditingArtwork(false); setShowFriendsModal(false); setShowAchievementsModal(false); setConfirmDelete(null); }}
                   className="absolute top-4 right-4 z-50 p-2.5 bg-black/50 border border-white/15 text-white rounded-full hover:bg-black/70 transition-all cursor-pointer"
                   style={{ pointerEvents:'all' }}
 >

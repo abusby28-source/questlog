@@ -1273,8 +1273,8 @@ async function getIgdbToken() {
               name: a.name || a.title || 'Unknown Achievement',
               description: a.description || '',
               icon: a.mediaAssets?.find(m => m.type === 'Icon')?.url || '',
-              unlocked: a.progression?.state === 'Achieved' || a.isUnlocked || false,
-              unlockTime: a.progression?.timeUnlocked || a.timeUnlocked || null
+              unlocked: a.progressState === 'Achieved' || a.progression?.state === 'Achieved' || (!!a.progression?.timeUnlocked && new Date(a.progression.timeUnlocked).getTime() > 0) || a.isUnlocked || false,
+              unlockTime: (() => { const t = a.progression?.timeUnlocked || a.timeUnlocked; if (!t) return null; const ms = new Date(t).getTime(); return (isNaN(ms) || ms <= 0) ? null : Math.floor(ms / 1000); })()
             })));
             
             // Add the game with full Xbox data
@@ -1286,7 +1286,7 @@ async function getIgdbToken() {
               matchedTitle.name,
               titleId,
               req.user.id,
-              matchedTitle.secondsPlayed || 0,
+              matchedTitle.secondsPlayed || matchedTitle.minutesPlayed || 0,
               achievementsJson,
               matchedTitle.image || '',
               matchedTitle.heroImage || '',
@@ -1306,8 +1306,8 @@ async function getIgdbToken() {
               name: a.name || a.title || 'Unknown Achievement',
               description: a.description || '',
               icon: a.mediaAssets?.find(m => m.type === 'Icon')?.url || '',
-              unlocked: a.progression?.state === 'Achieved' || a.isUnlocked || false,
-              unlockTime: a.progression?.timeUnlocked || a.timeUnlocked || null
+              unlocked: a.progressState === 'Achieved' || a.progression?.state === 'Achieved' || (!!a.progression?.timeUnlocked && new Date(a.progression.timeUnlocked).getTime() > 0) || a.isUnlocked || false,
+              unlockTime: (() => { const t = a.progression?.timeUnlocked || a.timeUnlocked; if (!t) return null; const ms = new Date(t).getTime(); return (isNaN(ms) || ms <= 0) ? null : Math.floor(ms / 1000); })()
             })));
             
             db.prepare(`
@@ -2234,7 +2234,9 @@ async function getIgdbToken() {
       // Fetch achievements for Xbox if missing
       // Re-fetch if empty OR if all stored achievements lack icons/descriptions (stale data from a failed prior sync)
       const xboxAchievementsNeedRefresh = !achievements || achievements.length === 0 ||
-        achievements.every((a: any) => !a.icon && !a.description);
+        achievements.every((a: any) => !a.icon && !a.description) ||
+        achievements.some((a: any) => a.unlockTime && isNaN(Number(a.unlockTime))) || // old ISO string format
+        achievements.some((a: any) => typeof a.unlockTime === 'number' && a.unlockTime < 0); // negative = null date from old broken mapping
       if (game.platform === 'xbox' && xboxAchievementsNeedRefresh) {
         try {
           const user = db.prepare("SELECT xbox_id, xbox_refresh_token FROM users WHERE id = ?").get(req.user.id);
@@ -2350,8 +2352,8 @@ async function getIgdbToken() {
                       name: a.name || a.title || 'Unknown Achievement',
                       description: a.description || '',
                       icon: a.mediaAssets?.find(m => m.type === 'Icon')?.url || '',
-                      unlocked: a.progression?.state === 'Achieved' || a.isUnlocked || false,
-                      unlockTime: a.progression?.timeUnlocked || a.timeUnlocked || null
+                      unlocked: a.progressState === 'Achieved' || a.progression?.state === 'Achieved' || (!!a.progression?.timeUnlocked && new Date(a.progression.timeUnlocked).getTime() > 0) || a.isUnlocked || false,
+                      unlockTime: (() => { const t = a.progression?.timeUnlocked || a.timeUnlocked; if (!t) return null; const ms = new Date(t).getTime(); return (isNaN(ms) || ms <= 0) ? null : Math.floor(ms / 1000); })()
                     }));
                     
                     // Update the database with achievements
@@ -2382,6 +2384,12 @@ async function getIgdbToken() {
           }
         }
       }
+
+      // Normalize unlockTime: null out negative timestamps (0001-01-01 null date from Xbox API)
+      achievements = achievements.map((a: any) => ({
+        ...a,
+        unlockTime: (typeof a.unlockTime === 'number' && a.unlockTime > 0) ? a.unlockTime : null
+      }));
 
       // Update database
       db.prepare("UPDATE launcher_games SET logo = ?, achievements = ?, description = ?, tags = ?, release_date = ? WHERE id = ?").run(logo, JSON.stringify(achievements), description, tags, release_date, id);

@@ -33,44 +33,14 @@ export interface GameSuggestion {
 
 export async function getGameSuggestions(query: string): Promise<GameSuggestion[]> {
   if (!query || query.length < 2) return [];
-
-  // 1. Try Steam Search
   try {
-    const steamRes = await fetch(`/api/search-steam?q=${encodeURIComponent(query)}`);
-    if (steamRes.ok) {
-      const steamData = await steamRes.text().then(t => t ? JSON.parse(t) : {}).catch(() => ({}));
-      if (steamData.items && steamData.items.length > 0) {
-        return steamData.items.map((item: any) => ({
-          title: item.name,
-          platform: 'Steam',
-          thumb: item.tiny_image,
-          steamAppID: item.id.toString()
-        }));
-      }
-    }
-  } catch (e) {
-    console.error("Steam search failed", e);
+    const results = await fetch(`/api/game-suggestions?q=${encodeURIComponent(query)}`)
+      .then(r => r.ok ? r.json() : [])
+      .catch(() => []);
+    return Array.isArray(results) ? results : [];
+  } catch {
+    return [];
   }
-
-  // 2. Fallback to CheapShark Search
-  try {
-    const csRes = await fetch(`/api/cheapshark/search?title=${encodeURIComponent(query)}`);
-    if (csRes.ok) {
-      const csData = await csRes.text().then(t => t ? JSON.parse(t) : {}).catch(() => ({}));
-      if (csData && csData.length > 0) {
-        return csData.slice(0, 5).map((item: any) => ({
-          title: item.external,
-          platform: 'PC',
-          thumb: item.thumb,
-          steamAppID: item.steamAppID
-        }));
-      }
-    }
-  } catch (e) {
-    console.error("CheapShark search failed", e);
-  }
-
-  return [];
 }
 
 export async function fetchSteamgridDBArtwork(steamAppID: string): Promise<{ artwork?: string, banner?: string, logo?: string, horizontal_grid?: string }> {
@@ -87,8 +57,10 @@ export async function fetchSteamgridDBArtwork(steamAppID: string): Promise<{ art
     if (gridRes.ok) {
       const gridData = await gridRes.text().then(t => t ? JSON.parse(t) : {}).catch(() => ({}));
       if (gridData.success && gridData.data && gridData.data.length > 0) {
-        const official = gridData.data.find((g: any) => g.style === 'official');
-        artwork = official ? official.url : gridData.data[0].url;
+        const nonAlt = gridData.data.filter((g: any) => g.style !== 'alternate');
+        const pool = nonAlt.length ? nonAlt : gridData.data;
+        const official = pool.find((g: any) => g.style === 'official');
+        artwork = official ? official.url : pool[0].url;
       }
     }
 
@@ -115,8 +87,11 @@ export async function fetchSteamgridDBArtwork(steamAppID: string): Promise<{ art
     if (logoRes.ok) {
       const logoData = await logoRes.text().then(t => t ? JSON.parse(t) : {}).catch(() => ({}));
       if (logoData.success && logoData.data && logoData.data.length > 0) {
-        const horizontal = logoData.data.find((l: any) => l.style === 'official' || l.width > l.height);
-        logo = horizontal ? horizontal.url : logoData.data[0].url;
+        const enLogos = logoData.data.filter((l: any) => !l.language || l.language === 'en');
+        const pool = enLogos.length ? enLogos : logoData.data;
+        const whites = pool.filter((l: any) => l.style === 'white' || l.style === 'custom');
+        const candidates = whites.length ? whites : pool;
+        logo = [...candidates].sort((a: any, b: any) => (b.width / b.height) - (a.width / a.height))[0]?.url;
       }
     }
 
@@ -167,7 +142,7 @@ export async function fetchSimilarSuggestions(titles: string): Promise<any[]> {
     - steamAppID: Steam App ID if known`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.1-flash-lite-preview",
+      model: "gemini-2.5-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -202,70 +177,31 @@ export async function fetchGameInfo(gameTitle: string, knownSteamAppID?: string)
   let steamAppID: string | null = knownSteamAppID || null;
   let cheapSharkPrice: string | null = null;
   let cheapSharkTitle: string | null = null;
-  let priceAlreadyGBP = false; // true when price came from ITAD (already in GBP)
+  let priceAlreadyGBP = true; // price from server endpoint is always GBP
 
-  // Fetch lowest price from IsThereAnyDeal
+  // Fetch lowest price from Allkeyshop via Gemini (server handles page fetch + extraction)
+  let allkeyshopUrlOverride: string | null = null;
   try {
-    const itadRes = await fetch(`/api/itad/price?title=${encodeURIComponent(gameTitle)}`);
-    if (itadRes.ok) {
-      const itadData = await itadRes.json();
-      if (itadData.price) { cheapSharkPrice = itadData.price; priceAlreadyGBP = true; } // already in GBP
-      if (itadData.steamAppID && !steamAppID) steamAppID = itadData.steamAppID;
+    const priceRes = await fetch(`/api/itad/price?title=${encodeURIComponent(gameTitle)}`);
+    if (priceRes.ok) {
+      const priceData = await priceRes.json();
+      if (priceData.price) { cheapSharkPrice = priceData.price; priceAlreadyGBP = true; }
+      if (priceData.allkeyshop_url) allkeyshopUrlOverride = priceData.allkeyshop_url;
     }
   } catch (e) {
-    console.error('ITAD price fetch failed', e);
+    console.error('Price fetch failed', e);
   }
 
-  // Fallback: CheapShark if ITAD returned nothing
-  if (!cheapSharkPrice) try {
-    const csResponse2 = await fetch(`/api/cheapshark/search?title=${encodeURIComponent(gameTitle)}`);
-    const csData2 = await csResponse2.text().then(t => t ? JSON.parse(t) : {}).catch(() => ({}));
-    if (csData2 && csData2.length > 0) {
-      const csGame = csData2[0];
-      cheapSharkTitle = csGame.external;
-      if (!steamAppID && csGame.steamAppID) steamAppID = csGame.steamAppID;
-
-      // Use the deals endpoint (via backend proxy) to get the real current lowest price
-      if (csGame.gameID) {
-        try {
-          const dealsRes = await fetch(`/api/cheapshark/deals?gameID=${csGame.gameID}`);
-          if (dealsRes.ok) {
-            const deals = await dealsRes.json();
-            if (deals && deals.length > 0) {
-              cheapSharkPrice = deals[0].salePrice; // USD string e.g. "5.99"
-            }
-          }
-        } catch {}
-      }
-      // Fallback to cheapest field if deals endpoint failed
-      if (!cheapSharkPrice) cheapSharkPrice = csGame.cheapest;
-    }
-  } catch (e) {
-    console.error("Failed to fetch from CheapShark", e);
-  }
-
-  // Fetch live USD→GBP exchange rate, fall back to 0.79 if unavailable
-  let usdToGbp = 0.79;
-  try {
-    const fxRes = await fetch('https://open.er-api.com/v6/latest/USD');
-    if (fxRes.ok) {
-      const fxData = await fxRes.json();
-      if (fxData?.rates?.GBP) usdToGbp = fxData.rates.GBP;
-    }
-  } catch {}
-
-  // Try to get Steam App ID if still not known
+  // Try to get Steam App ID via the server-side resolver (known map → Steam → IGDB)
   if (!steamAppID) {
     try {
-      const csResponse = await fetch(`/api/search-steam?q=${encodeURIComponent(gameTitle)}`);
-      const csData = await csResponse.text().then(t => t ? JSON.parse(t) : {}).catch(() => ({}));
-      if (csData && csData.items && csData.items.length > 0) {
-        const match = csData.items.find((i: any) => i.name.toLowerCase() === gameTitle.toLowerCase()) || csData.items[0];
-        steamAppID = match.id.toString();
-        if (!cheapSharkTitle) cheapSharkTitle = match.name;
+      const resolveRes = await fetch(`/api/resolve-steam?title=${encodeURIComponent(gameTitle)}`);
+      if (resolveRes.ok) {
+        const resolveData = await resolveRes.json().catch(() => ({}));
+        if (resolveData?.steamAppId) steamAppID = String(resolveData.steamAppId);
       }
     } catch (e) {
-      console.error("Failed to fetch from Steam Search", e);
+      console.error("Failed to resolve Steam App ID", e);
     }
   }
 
@@ -295,29 +231,56 @@ export async function fetchGameInfo(gameTitle: string, knownSteamAppID?: string)
   }
 
   try {
-    const igdbRes = await fetch(`/api/igdb/search?title=${encodeURIComponent(gameTitle)}`);
-    if (igdbRes.ok) {
-      const igdbData = await igdbRes.text().then(t => t ? JSON.parse(t) : {}).catch(() => ({}));
-      if (igdbData && igdbData.tags) {
-        igdbTags = igdbData.tags;
-      }
+    const tagsRes = await fetch(
+      `/api/tags?title=${encodeURIComponent(gameTitle)}&platform=${steamAppID ? 'steam' : 'other'}&external_id=${steamAppID || ''}`
+    );
+    if (tagsRes.ok) {
+      const tagsData = await tagsRes.json().catch(() => ({}));
+      if (tagsData?.tags) igdbTags = tagsData.tags;
     }
   } catch (e) {
-    console.error("Failed to fetch IGDB tags", e);
+    console.error("Failed to fetch tags", e);
   }
 
-  // Fetch high-quality artwork from SteamgridDB
+  // Fetch high-quality artwork from SteamgridDB (by Steam ID if available, otherwise by title)
   let sgdbArtwork: { artwork?: string, banner?: string, logo?: string, horizontal_grid?: string } = {};
   if (steamAppID) {
     sgdbArtwork = await fetchSteamgridDBArtwork(steamAppID);
   }
+  // If Steam ID lookup yielded no artwork (or there's no Steam ID), search SGDB by title
+  if (!sgdbArtwork.artwork && !sgdbArtwork.banner) {
+    try {
+      const r = await fetch(`/api/steamgriddb/artwork-by-name/${encodeURIComponent(gameTitle)}`);
+      if (r.ok) {
+        const d = await r.json().catch(() => ({}));
+        if (d.artwork || d.banner) sgdbArtwork = { ...d, ...sgdbArtwork }; // steam ID results take priority
+      }
+    } catch { /* ignore */ }
+  }
+
+  // IGDB fallback for description/genre/release_date when Steam has no data
+  let igdbMeta: { description?: string, genre?: string, release_date?: string, metacritic?: number } = {};
+  if (!steamDetails) {
+    try {
+      const igdbRes = await fetch(`/api/igdb/search?title=${encodeURIComponent(gameTitle)}`);
+      if (igdbRes.ok) {
+        const d = await igdbRes.json().catch(() => ({}));
+        if (d.description) igdbMeta.description = d.description;
+        if (d.genre) igdbMeta.genre = d.genre;
+        if (d.release_date) igdbMeta.release_date = d.release_date;
+        if (d.metacritic) igdbMeta.metacritic = d.metacritic;
+        // Also use IGDB tags if the SteamSpy pipeline returned nothing
+        if (d.tags && !igdbTags) igdbTags = d.tags;
+      }
+    } catch { /* ignore */ }
+  }
 
   // Construct GameInfo without Gemini
   const title = steamDetails?.name || cheapSharkTitle || gameTitle;
-  const description = steamDetails?.short_description?.replace(/<[^>]*>?/gm, '') || "No description available.";
-  const genre = steamDetails?.genres?.[0]?.description || "Unknown";
-  const release_date = steamDetails?.release_date?.date || "Unknown";
-  const metacritic = steamDetails?.metacritic?.score || null;
+  const description = steamDetails?.short_description?.replace(/<[^>]*>?/gm, '') || igdbMeta.description || "No description available.";
+  const genre = steamDetails?.genres?.[0]?.description || igdbMeta.genre || "Unknown";
+  const release_date = steamDetails?.release_date?.date || igdbMeta.release_date || "Unknown";
+  const metacritic = steamDetails?.metacritic?.score || (igdbMeta as any).metacritic || null;
   
   let steam_rating = null;
   if (steamReviews && steamReviews.review_score_desc) {
@@ -329,16 +292,27 @@ export async function fetchGameInfo(gameTitle: string, knownSteamAppID?: string)
     steam_rating = ratingStr;
   }
 
-  const tags = igdbTags || "Action, Adventure";
-  const game_pass = false; // Default to false without Gemini
-  
+  const tags = igdbTags || null;
+
+  // Check if game is on Game Pass
+  let game_pass = false;
+  try {
+    const gpRes = await fetch(`/api/gamepass/check?title=${encodeURIComponent(title)}`);
+    if (gpRes.ok) {
+      const gpData = await gpRes.json();
+      game_pass = gpData.game_pass === true;
+    }
+  } catch (e) {
+    console.error('Game Pass check failed', e);
+  }
+
   const formattedTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  const allkeyshop_url = `https://www.allkeyshop.com/blog/buy-${formattedTitle}-cd-key-compare-prices/`;
-  
+  const allkeyshop_url = allkeyshopUrlOverride || `https://www.allkeyshop.com/blog/buy-${formattedTitle}-cd-key-compare-prices/`;
+
   const lowest_price = cheapSharkPrice && parseFloat(cheapSharkPrice) > 0
-    ? (priceAlreadyGBP ? `£${parseFloat(cheapSharkPrice).toFixed(2)}` : `£${(parseFloat(cheapSharkPrice) * usdToGbp).toFixed(2)}`)
+    ? `£${parseFloat(cheapSharkPrice).toFixed(2)}`
     : null;
-  const steam_url = steamAppID ? `https://store.steampowered.com/app/${steamAppID}/` : `https://store.steampowered.com/search/?term=${encodeURIComponent(title)}`;
+  const steam_url = steamAppID ? `https://store.steampowered.com/app/${steamAppID}/` : '';
   
   const artwork = sgdbArtwork.artwork || (steamAppID ? `https://shared.steamstatic.com/store_item_assets/steam/apps/${steamAppID}/library_capsule_2x.jpg` : `https://picsum.photos/seed/${formattedTitle}/600/900`);
   const banner = sgdbArtwork.banner || (steamAppID ? `https://shared.steamstatic.com/store_item_assets/steam/apps/${steamAppID}/library_hero.jpg` : `https://picsum.photos/seed/${formattedTitle}-banner/1920/1080`);

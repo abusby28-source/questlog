@@ -6,3 +6,18 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Databases
+*.db
+
+# Loose debug / scratch scripts
+debug-*.js
+fix-*.js
+patch*.cjs
+test-*.js
+simple-xbox-scan.ts
+working-local-scan.js
+*.txt
+metadata.json
+out.txt
+server.log

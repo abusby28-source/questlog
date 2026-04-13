@@ -9,6 +9,11 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
+// Prevent unhandled async rejections from crashing the process
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason);
+});
+
 const JWT_SECRET = process.env.JWT_SECRET || "questlog-super-secret-key-123";
 
 // ── Database ──────────────────────────────────────────────────────────────────
@@ -175,19 +180,28 @@ app.post("/api/auth/register", async (req, res) => {
 });
 
 app.post("/api/auth/login", async (req, res) => {
-  const { username, password } = req.body;
-  const user = await row("SELECT * FROM users WHERE username = $1", [username]);
-  if (!user || !(await bcrypt.compare(password, user.password))) {
-    return res.status(401).json({ error: "Invalid credentials" });
+  try {
+    const { username, password } = req.body;
+    const user = await row("SELECT * FROM users WHERE username = $1", [username]);
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET);
+    res.json({ token, user: { id: user.id, username: user.username, avatar: user.avatar } });
+  } catch (e) {
+    console.error("Login error:", e.message);
+    res.status(503).json({ error: "Service temporarily unavailable, please try again" });
   }
-  const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET);
-  res.json({ token, user: { id: user.id, username: user.username, avatar: user.avatar } });
 });
 
 app.get("/api/auth/me", authenticate, async (req, res) => {
-  const user = await row("SELECT id, username, avatar, online_status, current_game, activity_private FROM users WHERE id = $1", [req.user.id]);
-  if (!user) return res.status(404).json({ error: "User not found" });
-  res.json(user);
+  try {
+    const user = await row("SELECT id, username, avatar, online_status, current_game, activity_private FROM users WHERE id = $1", [req.user.id]);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    res.json(user);
+  } catch (e) {
+    res.status(503).json({ error: "Service temporarily unavailable, please try again" });
+  }
 });
 
 // ── User routes ───────────────────────────────────────────────────────────────
@@ -565,6 +579,13 @@ async function initDbWithRetry(attempt = 1) {
     setTimeout(() => initDbWithRetry(attempt + 1), delay);
   }
 }
+
+// Global error handler — catches errors passed via next(err) and unhandled
+// async throws in routes that use express 5 or explicit next(err) calls
+app.use((err, req, res, _next) => {
+  console.error("Route error:", err.message);
+  res.status(500).json({ error: "Internal server error" });
+});
 
 // Start immediately so Railway health checks pass, retry DB in background
 app.listen(PORT, () => {

@@ -21,7 +21,6 @@ const JWT_SECRET = process.env.JWT_SECRET || "questlog-super-secret-key-123";
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
-  family: 4, // Force IPv4 — Railway can't route to Supabase over IPv6
 });
 
 // Shorthand query helpers

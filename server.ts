@@ -255,6 +255,7 @@ try {
     try { db.prepare("ALTER TABLE games ADD COLUMN previous_price TEXT").run(); } catch {}
     try { db.prepare("ALTER TABLE games ADD COLUMN price_dropped INTEGER DEFAULT 0").run(); } catch {}
     try { db.prepare("ALTER TABLE games ADD COLUMN game_pass_new INTEGER DEFAULT 0").run(); } catch {}
+    try { db.prepare("ALTER TABLE games ADD COLUMN game_pass_added_at TEXT").run(); } catch {}
 
     // 3. Fix games if missing constraints or columns
     if (gamesSchema && (!gamesSchema.sql.includes("REFERENCES users(id)") || !gamesSchema.sql.includes("release_date") || !gamesSchema.sql.includes("metacritic") || !gamesSchema.sql.includes("tags") || !gamesSchema.sql.includes("banner") || !gamesSchema.sql.includes("logo"))) {
@@ -376,12 +377,18 @@ const authenticateToken = (req, res, next) => {
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) return res.sendStatus(403);
-    
-    // Verify user still exists in DB and get full profile
-    const dbUser = db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
+
+    // Look up user in local DB; auto-create a stub row if this is a remote-auth user
+    let dbUser = db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
+    if (!dbUser) {
+      try {
+        // Insert a stub row so platform connections (Xbox, Steam etc.) can be stored locally
+        db.prepare("INSERT OR IGNORE INTO users (id, username, password) VALUES (?, ?, ?)").run(user.id, user.username, '');
+        dbUser = db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
+      } catch {}
+    }
     if (!dbUser) return res.sendStatus(403);
-    
-    // Don't send password in req.user
+
     const { password, ...userWithoutPassword } = dbUser;
     req.user = userWithoutPassword;
     next();
@@ -522,32 +529,33 @@ async function fetchTagsForGame(title: string, platform: string, externalId?: st
     // SteamSpy had no data — scrape the Steam store page directly
     const storeTags = await fetchSteamStoreTags(resolvedAppId);
     if (storeTags) return storeTags;
+    // Both appid-based lookups failed — fall through to title search below.
+    // This handles Steam games whose external_id was changed to an Xbox title ID by the merge step.
   }
 
-  if (!resolvedAppId) {
-    try {
-      const searchRes = await fetch(
-        `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(title)}&l=english&cc=US`
-      );
-      const searchData = await searchRes.json().catch(() => ({}));
-      if (searchData.items?.length) {
-        const queryClean = title.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
-        const queryWords = queryClean.split(/\s+/).filter((w: string) => w.length > 1);
-        const match = searchData.items.find((i: any) => {
-          const nameClean = i.name.toLowerCase().replace(/[^a-z0-9\s]/g, '');
-          if (nameClean === queryClean) return true;
-          return queryWords.length > 0 && queryWords.every((w: string) => new RegExp(`\\b${w}\\b`).test(nameClean));
-        });
-        if (match) {
-          const appid = String(match.id);
-          const tags = await fetchSteamSpyTags(appid);
-          if (tags) return tags;
-          const storeTags = await fetchSteamStoreTags(appid);
-          if (storeTags) return storeTags;
-        }
+  // Title-based Steam store search: used for non-Steam platforms, or as fallback when appid lookup fails.
+  try {
+    const searchRes = await fetch(
+      `https://store.steampowered.com/api/storesearch/?term=${encodeURIComponent(title)}&l=english&cc=US`
+    );
+    const searchData = await searchRes.json().catch(() => ({}));
+    if (searchData.items?.length) {
+      const queryClean = title.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+      const queryWords = queryClean.split(/\s+/).filter((w: string) => w.length > 1);
+      const match = searchData.items.find((i: any) => {
+        const nameClean = i.name.toLowerCase().replace(/[^a-z0-9\s]/g, '');
+        if (nameClean === queryClean) return true;
+        return queryWords.length > 0 && queryWords.every((w: string) => new RegExp(`\\b${w}\\b`).test(nameClean));
+      });
+      if (match) {
+        const appid = String(match.id);
+        const tags = await fetchSteamSpyTags(appid);
+        if (tags) return tags;
+        const storeTags = await fetchSteamStoreTags(appid);
+        if (storeTags) return storeTags;
       }
-    } catch { /* ignore */ }
-  }
+    }
+  } catch { /* ignore */ }
 
   const result = await generateTagsWithGemini(title, igdbContext);
   if (!result) return null;
@@ -612,6 +620,7 @@ async function getSteamFriendsForGame(steamAppId: string, steamUserId: string, a
     if (!friendListRes.ok) return [];
     const friendIds: string[] = ((await friendListRes.json()).friendslist?.friends || []).map((f: any) => f.steamid);
     if (!friendIds.length) return [];
+
     const summaryMap: Record<string, any> = {};
     const summariesRes = await fetch(
       `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key=${apiKey}&steamids=${friendIds.slice(0, 100).join(',')}`
@@ -619,23 +628,54 @@ async function getSteamFriendsForGame(steamAppId: string, steamUserId: string, a
     if (summariesRes.ok) {
       for (const p of ((await summariesRes.json()).response?.players || [])) summaryMap[p.steamid] = p;
     }
+
     const stateMap: Record<number, string> = { 0: 'offline', 1: 'online', 2: 'busy', 3: 'away', 4: 'away', 5: 'away', 6: 'in_game' };
+
     const checks = friendIds.slice(0, 50).map(async (steamid: string) => {
       try {
+        // appids_filter limits response to only this game — faster and more targeted than full library fetch
         const ownedRes = await fetch(
-          `https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${apiKey}&steamid=${steamid}&include_appinfo=0&format=json`
+          `https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${apiKey}&steamid=${steamid}&include_appinfo=0&include_played_free_games=1&appids_filter%5B0%5D=${steamAppId}&format=json`
         );
         if (!ownedRes.ok) return null;
-        const found = ((await ownedRes.json()).response?.games || []).find((g: any) => String(g.appid) === String(steamAppId));
+        const ownedData = await ownedRes.json();
+        const games = ownedData.response?.games || [];
+        const found = games.find((g: any) => String(g.appid) === String(steamAppId));
         if (!found) return null;
-        console.log(`[Steam friends] ${steamid} owns appId ${steamAppId}: rtime_last_played=${found.rtime_last_played}, playtime=${found.playtime_forever}`);
+
         const s = summaryMap[steamid];
+        const isCurrentlyPlaying = s?.gameid && String(s.gameid) === String(steamAppId);
+
+        let lastPlayed: number | null = null;
+        if (isCurrentlyPlaying) {
+          lastPlayed = Math.floor(Date.now() / 1000);
+        } else if (found.rtime_last_played > 0) {
+          lastPlayed = found.rtime_last_played;
+        } else {
+          // rtime_last_played is 0 — fall back to recently played (covers last 2 weeks)
+          try {
+            const recentRes = await fetch(
+              `https://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v1/?key=${apiKey}&steamid=${steamid}&format=json`
+            );
+            if (recentRes.ok) {
+              const recentGames = (await recentRes.json()).response?.games || [];
+              const recentMatch = recentGames.find((g: any) => String(g.appid) === String(steamAppId));
+              if (recentMatch) {
+                // Played within 2 weeks but no exact timestamp — use mid-point estimate (7 days ago)
+                lastPlayed = Math.floor(Date.now() / 1000) - 7 * 24 * 3600;
+              }
+            }
+          } catch { /* ignore */ }
+        }
+
+        console.log(`[Steam friends] ${s?.personaname || steamid}: rtime=${found.rtime_last_played}, lastPlayed=${lastPlayed}`);
+
         return {
           username: s?.personaname || steamid,
           avatar: s?.avatarfull || null,
-          online_status: s?.gameid ? 'in_game' : (stateMap[s?.personastate ?? 0] ?? 'offline'),
+          online_status: isCurrentlyPlaying ? 'in_game' : (stateMap[s?.personastate ?? 0] ?? 'offline'),
           current_game: s?.gameextrainfo || null,
-          last_played: found.rtime_last_played || null,
+          last_played: lastPlayed,
           platform: 'steam'
         };
       } catch { return null; }
@@ -1060,12 +1100,11 @@ async function getIgdbToken() {
             if (m) steamAppID = m[1];
           }
         }
-        // Always fetch Metacritic user score (scraped from metacritic.com).
-        // Stored as score×10 (e.g. 8.3 → 83); display divides by 10.
+        // Only scrape Metacritic for non-Steam games — Steam games use Steam reviews instead
         let metacritic: number | null = null;
-        const userScore = await fetchMetacriticUserScore(title);
-        if (userScore !== null) {
-          metacritic = Math.round(userScore * 10);
+        if (!steamAppID) {
+          const userScore = await fetchMetacriticUserScore(title);
+          if (userScore !== null) metacritic = Math.round(userScore * 10);
         }
         res.json({
           tags: tags.length > 0 ? tags.join(', ') : null,
@@ -1512,7 +1551,7 @@ async function getIgdbToken() {
       const onPass = catalog.has(normalized) || (words.length > 0 && [...catalog.keys()].some(t => words.every((w: string) => t.includes(w))));
       if (onPass && !game.game_pass) {
         // Newly added to Game Pass — flag it
-        db.prepare("UPDATE games SET game_pass = 1, game_pass_new = 1 WHERE id = ? AND user_id = ?").run(game.id, userId);
+        db.prepare("UPDATE games SET game_pass = 1, game_pass_new = 1, game_pass_added_at = ? WHERE id = ? AND user_id = ?").run(new Date().toISOString(), game.id, userId);
       } else if (onPass && game.game_pass) {
         // Already marked on Game Pass — just ensure game_pass stays 1, don't touch game_pass_new
         db.prepare("UPDATE games SET game_pass = 1 WHERE id = ? AND user_id = ?").run(game.id, userId);
@@ -2883,6 +2922,13 @@ async function getIgdbToken() {
           const th = matchedTitle.titleHistory || matchedTitle.history;
           const playtime = th && typeof th.minutesPlayed === 'number' ? th.minutesPlayed
             : typeof matchedTitle.minutesPlayed === 'number' ? matchedTitle.minutesPlayed : 0;
+          let lastPlayedLocal: string | null = null;
+          if (th?.lastTimePlayed) {
+            try {
+              const d = new Date(th.lastTimePlayed);
+              if (d.getTime() > 0) lastPlayedLocal = d.toISOString();
+            } catch { /* ignore invalid date */ }
+          }
           let xbArtwork = matchedTitle.displayImage || matchedTitle.image || '';
           let xbBanner = '';
           if (matchedTitle.mediaAssets?.length) {
@@ -2933,8 +2979,8 @@ async function getIgdbToken() {
             // Add the game with full Xbox data + SteamGridDB artwork
             db.prepare(`
               INSERT INTO launcher_games
-                (title, platform, external_id, user_id, playtime, installed, hidden, achievements, artwork, banner, logo, description, tags, genre, release_date)
-              VALUES (?, 'xbox', ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                (title, platform, external_id, user_id, playtime, installed, hidden, achievements, artwork, banner, logo, description, tags, genre, release_date, last_played)
+              VALUES (?, 'xbox', ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
               matchedTitle.name,
               titleId,
@@ -2947,7 +2993,8 @@ async function getIgdbToken() {
               description,
               xboxTags,
               detailGenres[0] || '',
-              releaseDate
+              releaseDate,
+              lastPlayedLocal
             );
 
             addedCount++;
@@ -2965,7 +3012,8 @@ async function getIgdbToken() {
 
             db.prepare(`
               UPDATE launcher_games
-              SET installed = 1, playtime = ?, achievements = ?, artwork = ?, banner = ?, logo = ?, description = ?, tags = ?, genre = ?, release_date = ?
+              SET installed = 1, playtime = ?, achievements = ?, artwork = ?, banner = ?, logo = ?, description = ?, tags = ?, genre = ?, release_date = ?,
+                last_played = CASE WHEN ? IS NOT NULL AND (last_played IS NULL OR ? > last_played) THEN ? ELSE last_played END
               WHERE id = ?
             `).run(
               playtime,
@@ -2977,6 +3025,7 @@ async function getIgdbToken() {
               detailGenres.join(','),
               detailGenres[0] || '',
               releaseDate,
+              lastPlayedLocal, lastPlayedLocal, lastPlayedLocal,
               existing.id
             );
             
@@ -3256,8 +3305,9 @@ async function getIgdbToken() {
           if (heroAsset?.url) banner = heroAsset.url;
         }
 
-        // Playtime — titlehub v2 nests under titleHistory; older APIs have it at root
+        // Playtime + last played — titlehub v2 nests under titleHistory; older APIs have it at root
         let playtime = 0;
+        let lastPlayed: string | null = null;
         const th = t.titleHistory || t.history;
         if (th) {
           if (typeof th.minutesPlayed === 'number') {
@@ -3265,6 +3315,12 @@ async function getIgdbToken() {
           } else if (typeof th.totalTimePlayed === 'string') {
             const m = th.totalTimePlayed.match(/P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
             if (m) playtime = (parseInt(m[1]||'0')*1440) + (parseInt(m[2]||'0')*60) + parseInt(m[3]||'0');
+          }
+          if (th.lastTimePlayed) {
+            try {
+              const d = new Date(th.lastTimePlayed);
+              if (d.getTime() > 0) lastPlayed = d.toISOString();
+            } catch { /* ignore invalid date */ }
           }
         } else if (typeof t.minutesPlayed === 'number') {
           playtime = t.minutesPlayed;
@@ -3296,8 +3352,9 @@ async function getIgdbToken() {
           if (!ex.description && description) ex.description = description;
           if (!ex.genres?.length && detailGenres.length) ex.genres = detailGenres;
           if (!ex.releaseDate && releaseDate) ex.releaseDate = releaseDate;
+          if (lastPlayed && (!ex.lastPlayed || lastPlayed > ex.lastPlayed)) ex.lastPlayed = lastPlayed;
         } else {
-          titlesMap.set(id, { id, name, type, artwork, banner, playtime, scid, description, genres: detailGenres, releaseDate });
+          titlesMap.set(id, { id, name, type, artwork, banner, playtime, scid, description, genres: detailGenres, releaseDate, lastPlayed });
         }
       };
 
@@ -3468,18 +3525,22 @@ async function getIgdbToken() {
       }));
 
       const stmt = db.prepare(`
-        INSERT INTO launcher_games (title, artwork, banner, platform, external_id, user_id, playtime, achievements, description, genre, release_date, tags, installed, hidden)
-        VALUES (?, ?, ?, 'xbox', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+        INSERT INTO launcher_games (title, artwork, banner, platform, external_id, user_id, playtime, achievements, description, genre, release_date, tags, installed, hidden, last_played)
+        VALUES (?, ?, ?, 'xbox', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)
         ON CONFLICT(platform, external_id, user_id) DO UPDATE SET
-          title = excluded.title,
           playtime = MAX(playtime, excluded.playtime),
-          artwork = CASE WHEN excluded.artwork != '' THEN excluded.artwork ELSE artwork END,
-          banner = CASE WHEN excluded.banner != '' THEN excluded.banner ELSE banner END,
           achievements = excluded.achievements,
-          description = CASE WHEN excluded.description != '' THEN excluded.description ELSE description END,
-          genre = CASE WHEN excluded.genre != '' THEN excluded.genre ELSE genre END,
-          release_date = CASE WHEN excluded.release_date != '' THEN excluded.release_date ELSE release_date END,
-          tags = CASE WHEN excluded.tags != '' THEN excluded.tags ELSE tags END
+          artwork = CASE WHEN (artwork IS NULL OR artwork = '') AND excluded.artwork != '' THEN excluded.artwork ELSE artwork END,
+          banner = CASE WHEN (banner IS NULL OR banner = '') AND excluded.banner != '' THEN excluded.banner ELSE banner END,
+          description = CASE WHEN (description IS NULL OR description = '') AND excluded.description != '' THEN excluded.description ELSE description END,
+          genre = CASE WHEN (genre IS NULL OR genre = '') AND excluded.genre != '' THEN excluded.genre ELSE genre END,
+          release_date = CASE WHEN (release_date IS NULL OR release_date = '') AND excluded.release_date != '' THEN excluded.release_date ELSE release_date END,
+          tags = CASE WHEN (tags IS NULL OR tags = '') AND excluded.tags != '' THEN excluded.tags ELSE tags END,
+          last_played = CASE
+            WHEN excluded.last_played IS NOT NULL AND (last_played IS NULL OR excluded.last_played > last_played)
+            THEN excluded.last_played
+            ELSE last_played
+          END
       `);
 
       const insertMany = db.transaction((gamesToInsert) => {
@@ -3556,7 +3617,8 @@ async function getIgdbToken() {
             description,
             genre,
             releaseDate,
-            tags
+            tags,
+            game.lastPlayed || null
           );
         }
       });
@@ -3905,12 +3967,17 @@ async function getIgdbToken() {
       const localAppIds = await getInstalledSteamAppIds();
 
       const stmt = db.prepare(`
-        INSERT INTO launcher_games (title, artwork, banner, platform, external_id, user_id, playtime, installed, hidden)
-        VALUES (?, ?, ?, 'steam', ?, ?, ?, ?, 0)
+        INSERT INTO launcher_games (title, artwork, banner, platform, external_id, user_id, playtime, installed, hidden, last_played)
+        VALUES (?, ?, ?, 'steam', ?, ?, ?, ?, 0, ?)
         ON CONFLICT(platform, external_id, user_id) DO UPDATE SET
           title = excluded.title,
           playtime = MAX(playtime, excluded.playtime),
-          installed = excluded.installed
+          installed = excluded.installed,
+          last_played = CASE
+            WHEN excluded.last_played IS NOT NULL AND (last_played IS NULL OR excluded.last_played > last_played)
+            THEN excluded.last_played
+            ELSE last_played
+          END
       `);
 
       const insertMany = db.transaction((games) => {
@@ -3918,7 +3985,8 @@ async function getIgdbToken() {
           const artwork = `https://shared.steamstatic.com/store_item_assets/steam/apps/${game.appid}/library_capsule_2x.jpg`;
           const banner = `https://shared.steamstatic.com/store_item_assets/steam/apps/${game.appid}/library_hero.jpg`;
           const isInstalled = localAppIds.has(String(game.appid)) ? 1 : 0;
-          stmt.run(game.name, artwork, banner, String(game.appid), req.user.id, game.playtime_forever || 0, isInstalled);
+          const lastPlayed = game.rtime_last_played ? new Date(game.rtime_last_played * 1000).toISOString() : null;
+          stmt.run(game.name, artwork, banner, String(game.appid), req.user.id, game.playtime_forever || 0, isInstalled, lastPlayed);
         }
       });
 
@@ -4007,7 +4075,6 @@ async function getIgdbToken() {
                 genre = genres[0] || genre;
                 const steamReleaseDate = details.release_date?.date || null;
                 release_date = steamReleaseDate || release_date;
-                if (details.metacritic?.score) metacritic = details.metacritic.score;
               }
             }
           } catch (e) {
@@ -4020,9 +4087,11 @@ async function getIgdbToken() {
           logo = sgdb.logo;
         }
 
-        // Tags: SteamSpy (by appid for Steam, store search for others) → Gemini fallback
-        const newTags = await fetchTagsForGame(game.title, game.platform, game.external_id || undefined);
-        if (newTags) tags = newTags;
+        // Tags: only fetch if missing — never overwrite existing tags (preserves SteamSpy tags on merged games)
+        if (!tags) {
+          const newTags = await fetchTagsForGame(game.title, game.platform, game.external_id || undefined);
+          if (newTags) tags = newTags;
+        }
 
         // IGDB: description, genre, release_date, metacritic
         try {
@@ -4033,18 +4102,6 @@ async function getIgdbToken() {
               if (!description && igdbData.description) description = igdbData.description;
               if (!genre && igdbData.genre) genre = igdbData.genre;
               if (!release_date && igdbData.release_date) release_date = igdbData.release_date;
-              if (igdbData.metacritic) metacritic = igdbData.metacritic;
-              // IGDB has a Steam App ID but no metacritic (e.g. Xbox game with Steam version) — fetch from Steam
-              if (!metacritic && igdbData.steamAppID) {
-                try {
-                  const smRes = await fetch(`https://store.steampowered.com/api/appdetails?appids=${igdbData.steamAppID}&filters=metacritic&l=english`);
-                  if (smRes.ok) {
-                    const smData = await smRes.json().catch(() => ({}));
-                    const score = smData?.[igdbData.steamAppID]?.data?.metacritic?.score;
-                    if (score) metacritic = score;
-                  }
-                } catch { /* ignore */ }
-              }
             }
           }
         } catch (igdbError) {
@@ -4081,10 +4138,20 @@ async function getIgdbToken() {
     }
   });
 
+  // Cache: keyed by `${userId}:${gameId}`, TTL 1 hour
+  const friendsCache = new Map<string, { data: any[]; fetchedAt: number }>();
+  const FRIENDS_CACHE_TTL = 60 * 60 * 1000;
+
   app.get("/api/launcher/games/:id/friends", authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
       const userId = req.user.id;
+      const cacheKey = `${userId}:${id}`;
+      const cached = friendsCache.get(cacheKey);
+      if (cached && Date.now() - cached.fetchedAt < FRIENDS_CACHE_TTL) {
+        return res.json(cached.data);
+      }
+
       const game = db.prepare("SELECT id, external_id, platform, title FROM launcher_games WHERE id = ?").get(id) as any;
       if (!game) return res.json([]);
       const user = db.prepare("SELECT steam_id, xbox_refresh_token FROM users WHERE id = ?").get(userId) as any;
@@ -4122,11 +4189,13 @@ async function getIgdbToken() {
         if (!existing || (!existing.last_played && f.last_played)) seen.set(key, f);
       }
 
-      const deduped = [...seen.values()];
-      res.json(deduped.sort((a, b) => {
+      const deduped = [...seen.values()].sort((a, b) => {
         const rank = (s) => s === 'in_game' ? 0 : s === 'online' ? 1 : s === 'away' ? 2 : 3;
         return rank(a.online_status) - rank(b.online_status) || a.username.localeCompare(b.username);
-      }));
+      });
+
+      friendsCache.set(cacheKey, { data: deduped, fetchedAt: Date.now() });
+      res.json(deduped);
     } catch (error) {
       console.error("Friends-who-own error:", error);
       res.status(500).json({ error: "Failed to fetch friends who own this game" });
@@ -4777,6 +4846,95 @@ async function getIgdbToken() {
     }
   });
 
+  // Lightweight install-state check — no metadata fetching, just scans disk
+  app.post("/api/launcher/check-installs", authenticateToken, async (req: any, res) => {
+    if (process.platform !== 'win32') return res.status(400).json({ error: "Windows only" });
+    try {
+      const fs = await import('fs');
+      const changed: { id: number; title: string; installed: boolean }[] = [];
+
+      // ── Steam: read appmanifest files ──────────────────────────────────────
+      const steamAppIds = await getInstalledSteamAppIds();
+      const steamGames = db.prepare(
+        "SELECT id, title, external_id, installed FROM launcher_games WHERE user_id = ? AND platform = 'steam'"
+      ).all(req.user.id) as any[];
+
+      for (const g of steamGames) {
+        const nowInstalled = steamAppIds.has(String(g.external_id));
+        if (!!g.installed !== nowInstalled) {
+          db.prepare("UPDATE launcher_games SET installed = ? WHERE id = ?").run(nowInstalled ? 1 : 0, g.id);
+          changed.push({ id: g.id, title: g.title, installed: nowInstalled });
+        }
+      }
+
+      // ── Epic: read LauncherInstalled.dat ──────────────────────────────────
+      const epicManifestPath = 'C:\\ProgramData\\Epic\\EpicGamesLauncher\\Data\\Manifests';
+      const epicGames = db.prepare(
+        "SELECT id, title, external_id, launch_path, installed FROM launcher_games WHERE user_id = ? AND platform = 'epic'"
+      ).all(req.user.id) as any[];
+
+      if (epicGames.length > 0) {
+        const installedAppNames = new Set<string>();
+        try {
+          if (fs.existsSync(epicManifestPath)) {
+            const files = fs.readdirSync(epicManifestPath).filter(f => f.endsWith('.item'));
+            for (const file of files) {
+              try {
+                const content = JSON.parse(fs.readFileSync(path.join(epicManifestPath, file), 'utf8'));
+                if (content.AppName) installedAppNames.add(content.AppName);
+              } catch { /* skip malformed manifest */ }
+            }
+          }
+        } catch { /* Epic not installed or no access */ }
+
+        for (const g of epicGames) {
+          // Derive appName from launch_path: com.epicgames.launcher://apps/{appName}?action=launch
+          const match = g.launch_path?.match(/\/apps\/([^?]+)/);
+          const appName = match?.[1];
+          if (!appName) continue;
+          const nowInstalled = installedAppNames.has(appName);
+          if (!!g.installed !== nowInstalled) {
+            db.prepare("UPDATE launcher_games SET installed = ? WHERE id = ?").run(nowInstalled ? 1 : 0, g.id);
+            changed.push({ id: g.id, title: g.title, installed: nowInstalled });
+          }
+        }
+      }
+
+      // ── Xbox: check C:\XboxGames folders ───────────────────────────────────
+      const xboxGames = db.prepare(
+        "SELECT id, title, installed FROM launcher_games WHERE user_id = ? AND platform = 'xbox'"
+      ).all(req.user.id) as any[];
+
+      if (xboxGames.length > 0) {
+        const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const xboxFolders = new Set<string>();
+        try {
+          const xboxPath = 'C:\\XboxGames';
+          if (fs.existsSync(xboxPath)) {
+            for (const entry of fs.readdirSync(xboxPath, { withFileTypes: true })) {
+              if (entry.isDirectory()) xboxFolders.add(normalize(entry.name));
+            }
+          }
+        } catch { /* XboxGames folder missing or no access */ }
+
+        for (const g of xboxGames) {
+          const normTitle = normalize(g.title);
+          const nowInstalled = xboxFolders.has(normTitle)
+            || [...xboxFolders].some(f => f.includes(normTitle) || normTitle.includes(f));
+          if (!!g.installed !== nowInstalled) {
+            db.prepare("UPDATE launcher_games SET installed = ? WHERE id = ?").run(nowInstalled ? 1 : 0, g.id);
+            changed.push({ id: g.id, title: g.title, installed: nowInstalled });
+          }
+        }
+      }
+
+      res.json({ ok: true, changed });
+    } catch (e) {
+      console.error('check-installs error:', e);
+      res.status(500).json({ error: 'Failed to check install state' });
+    }
+  });
+
   // Keywords that indicate non-game Steam items to exclude from Discover rows
   const NON_GAME_KEYWORDS = [
     'soundtrack', ' ost', 'dlc', 'demo', 'playtest', 'bundle', 'steam deck',
@@ -4990,7 +5148,7 @@ async function getIgdbToken() {
     const meta: Record<string, any> = {};
     if (steamAppID && /^\d+$/.test(steamAppID)) {
       const [detailsData, reviewsData, spyTags] = await Promise.all([
-        fetch(`https://store.steampowered.com/api/appdetails?appids=${steamAppID}&filters=basic,short_description,genres,metacritic,release_date&l=english`)
+        fetch(`https://store.steampowered.com/api/appdetails?appids=${steamAppID}&filters=basic,short_description,genres,release_date&l=english`)
           .then(r => r.ok ? r.json() : {}).catch(() => ({})),
         fetch(`https://store.steampowered.com/appreviews/${steamAppID}?json=1&language=all&num_per_page=0`)
           .then(r => r.ok ? r.json() : {}).catch(() => ({})),
@@ -5001,7 +5159,6 @@ async function getIgdbToken() {
         if (data.type) meta.appType = data.type;
         if (data.short_description) meta.description = data.short_description.replace(/<[^>]*>/g, '');
         if (data.genres?.[0]?.description) meta.genre = data.genres[0].description;
-        if (data.metacritic?.score) meta.metacritic = data.metacritic.score;
         if (data.release_date?.date) meta.release_date = data.release_date.date;
       }
       if (reviewsData?.success && reviewsData.query_summary?.review_score_desc) {
@@ -5027,7 +5184,6 @@ async function getIgdbToken() {
           if (d.genre && !meta.genre) meta.genre = d.genre;
           if (d.release_date && !meta.release_date) meta.release_date = d.release_date;
           if (d.tags && !meta.tags) meta.tags = d.tags;
-          if (d.metacritic && !meta.metacritic) meta.metacritic = d.metacritic;
           // Capture IGDB-provided Steam App ID — used as fallback when storesearch fails
           if (d.steamAppID && !meta.igdbSteamAppID) meta.igdbSteamAppID = d.steamAppID;
         }
@@ -6874,6 +7030,11 @@ async function getIgdbToken() {
     if (!appId) return res.json([]);
     try {
       const userId = req.user.id;
+      const cacheKey = `ql:${userId}:${appId}`;
+      const cached = friendsCache.get(cacheKey);
+      if (cached && Date.now() - cached.fetchedAt < FRIENDS_CACHE_TTL) {
+        return res.json(cached.data);
+      }
       const user = db.prepare("SELECT steam_id, xbox_refresh_token FROM users WHERE id = ?").get(userId) as any;
       const results: any[] = [];
 
@@ -6915,11 +7076,11 @@ async function getIgdbToken() {
         if (!existing || (!existing.last_played && f.last_played)) seen.set(key, f);
       }
 
-      const deduped = [...seen.values()];
-      deduped.sort((a, b) => {
+      const deduped = [...seen.values()].sort((a, b) => {
         const rank = (s) => s === 'in_game' ? 0 : s === 'online' ? 1 : s === 'away' ? 2 : 3;
         return rank(a.online_status) - rank(b.online_status) || a.username.localeCompare(b.username);
       });
+      friendsCache.set(cacheKey, { data: deduped, fetchedAt: Date.now() });
       res.json(deduped);
     } catch (e) {
       console.error('Questlog friends error:', e);

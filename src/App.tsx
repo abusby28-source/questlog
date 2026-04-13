@@ -15,6 +15,22 @@ import {
   ResponsiveContainer, AreaChart, Area
 } from'recharts';
 import { fetchGameInfo, GameInfo, getGameSuggestions, GameSuggestion, fetchSimilarSuggestions } from'./services/geminiService';
+import {
+  remoteLogin, remoteRegister, remoteMe,
+  remoteUpdateAvatar, remoteUpdateSettings, remoteUpdateStatus,
+  remoteSyncStats, remoteSyncLibrary,
+  remoteSearchUsers,
+  remoteGetFriends, remoteGetPendingFriends, remoteAddFriend, remoteRemoveFriend,
+  remoteGetFriendRecentGames, remoteGetFriendStats,
+  remoteGetNotifications,
+  remoteGetGroups, remoteCreateGroup, remoteJoinGroup, remoteDeleteGroup,
+  remoteGetSharedGames, remoteAddSharedGame, remoteUpdateSharedGame,
+  remoteUpdateSharedGameStatus, remoteDeleteSharedGame,
+  remoteDismissPriceAlert, remoteDismissGamePassAlert,
+  remoteGetGroupOwnership,
+  remoteGetComments, remoteAddComment, remoteDeleteComment,
+  remoteGetMessages, remoteSendMessage, remoteMarkMessagesRead,
+} from './services/remoteApi';
 import { Game } from'./types';
 import { clsx, type ClassValue } from'clsx';
 import { twMerge } from'tailwind-merge';
@@ -123,12 +139,12 @@ function ExternalGameCard({ game, onClick, loading }: { game: DiscoverGame; onCl
     <motion.div
       whileHover={{ y: -5 }}
       onClick={onClick}
-      className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer border border-white/5 bg-white/5 snap-start shrink-0"
+      className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
     >
       <CachedImg
         proxyUrl={proxyUrl}
         alt={game.title}
-        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
+        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]"
         onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
       />
       {loading && (
@@ -252,7 +268,6 @@ function getVagueUpcoming(releaseDateStr: string | undefined | null): string | n
 
 const HorizontalScrollRow = ({ children, title, icon }: { children: React.ReactNode; title: string; icon: React.ReactNode }) => {
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
-
   const scroll = (direction:'left' |'right') => {
     if (scrollRef.current) {
       const scrollAmount = scrollRef.current.clientWidth * 0.8;
@@ -271,25 +286,29 @@ const HorizontalScrollRow = ({ children, title, icon }: { children: React.ReactN
           {title}
         </h2>
       </div>
-      
+
       <div className="relative">
         <button
           onClick={() => scroll('left')}
           className="absolute -left-4 top-1/2 -translate-y-1/2 z-10 p-2 rounded-full bg-black/60 border border-white/10 text-white opacity-0 group-hover/row:opacity-100 transition-opacity hover:bg-black/80"
->
+        >
           <ChevronLeft size={24}/>
         </button>
-        
-        <div ref={scrollRef} className="flex overflow-x-auto gap-4 pb-4 snap-x hide-scrollbar scroll-smooth">
+
+        <div
+          ref={scrollRef}
+          className="flex overflow-x-auto gap-4 pt-2 -mt-2 pb-4 snap-x hide-scrollbar scroll-smooth"
+        >
           {children}
         </div>
 
         <button
           onClick={() => scroll('right')}
           className="absolute -right-4 top-1/2 -translate-y-1/2 z-10 p-2 rounded-full bg-black/60 border border-white/10 text-white opacity-0 group-hover/row:opacity-100 transition-opacity hover:bg-black/80"
->
+        >
           <ChevronRight size={24}/>
         </button>
+
       </div>
     </section>
   );
@@ -345,6 +364,7 @@ interface LauncherGame {
   price_dropped?: number;
   previous_price?: string;
   game_pass_new?: number;
+  game_pass_added_at?: string;
 }
 
 interface FriendEntry { id: number | string; username: string; avatar?: string; online_status: string; current_game?: string; }
@@ -977,6 +997,7 @@ export default function App() {
   const [selectedLauncherGame, setSelectedLauncherGame] = useState<LauncherGame | null>(null);
   const [launcherSearch, setLauncherSearch] = useState('');
   const [launcherInstalledFilter, setLauncherInstalledFilter] = useState<'all' | 'installed' | 'not-installed'>('all');
+  const [isCheckingInstalls, setIsCheckingInstalls] = useState(false);
   const [activeSession, setActiveSession] = useState<{ gameId: number; gameName: string; platform: string; sessionStart: number } | null>(null);
   const [sessionElapsed, setSessionElapsed] = useState(0); // seconds
   const [editingPlaytime, setEditingPlaytime] = useState(false);
@@ -1022,7 +1043,7 @@ export default function App() {
   // Notifications + messaging
   const [notificationCount, setNotificationCount] = useState(0);
   const [pendingRequests, setPendingRequests] = useState<{id: number; username: string; avatar?: string}[]>([]);
-  const [friendsModalTab, setFriendsModalTab] = useState<'friends' | 'messages'>('friends');
+  const [friendsModalTab, setFriendsModalTab] = useState<'friends' | 'messages' | 'settings'>('friends');
   const [selectedConvoFriend, setSelectedConvoFriend] = useState<{id: number; username: string; avatar?: string} | null>(null);
   const [convoMessages, setConvoMessages] = useState<any[]>([]);
   const [convoInput, setConvoInput] = useState('');
@@ -1031,6 +1052,12 @@ export default function App() {
   const [shareTargetFriend, setShareTargetFriend] = useState<number | null>(null);
   const [shareMessageText, setShareMessageText] = useState('');
   const [shareCopied, setShareCopied] = useState(false);
+  const [activityPrivate, setActivityPrivate] = useState(false);
+  const [settingsUsername, setSettingsUsername] = useState('');
+  const [settingsCurrentPwd, setSettingsCurrentPwd] = useState('');
+  const [settingsNewPwd, setSettingsNewPwd] = useState('');
+  const [settingsConfirmPwd, setSettingsConfirmPwd] = useState('');
+  const [settingsSaveMsg, setSettingsSaveMsg] = useState<{type: 'success' | 'error'; text: string} | null>(null);
 
   const handleSyncXbox = async () => {
     try {
@@ -1502,11 +1529,8 @@ export default function App() {
     appFriends.forEach(async friend => {
       if (friendsLibraryStats[friend.id]) return;
       try {
-        const res = await fetch(`/api/friends/${friend.id}/stats`, { headers: { Authorization: `Bearer ${token}` } });
-        if (res.ok) {
-          const data = await res.json();
-          setFriendsLibraryStats(prev => ({ ...prev, [friend.id]: data }));
-        }
+        const data = await remoteGetFriendStats(friend.id);
+        setFriendsLibraryStats(prev => ({ ...prev, [friend.id]: data }));
       } catch {}
     });
   }, [showStatsDetail, appFriends.length, token]); // eslint-disable-line
@@ -1575,6 +1599,16 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setHomeData(data);
+        // Sync full stats to remote (non-blocking)
+        try {
+          remoteSyncStats({
+            library_count: data.stats?.libraryCount || 0,
+            backlog_count: data.stats?.backlogCount || 0,
+            total_playtime_hours: data.stats?.playtimeHours || 0,
+            top_genre: data.stats?.topGenre || undefined,
+            top_game: data.stats?.topGame || undefined,
+          });
+        } catch { /* non-critical */ }
         // Background pre-load metadata for unmatched Friends Activity games
         const unmatched = (data.friendsActivity || []).filter(
           (g: any) => !g.matchedLibraryId && !g.matchedQuestlogId
@@ -1627,36 +1661,31 @@ export default function App() {
   const fetchAppFriends = async () => {
     if (!token) return;
     try {
-      const res = await fetch('/api/friends', { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) setAppFriends(await res.json());
+      setAppFriends(await remoteGetFriends());
     } catch (e) {}
   };
 
   const searchUsers = async (q: string) => {
     if (!token || q.length < 2) { setFriendSearchResults([]); return; }
     try {
-      const res = await fetch(`/api/users/search?q=${encodeURIComponent(q)}`, { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) setFriendSearchResults(await res.json());
+      setFriendSearchResults(await remoteSearchUsers(q));
     } catch (e) {}
   };
 
   const addFriend = async (username: string) => {
     if (!token) return;
     try {
-      const res = await fetch('/api/friends/add', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ username })
-      });
-      if (res.ok) { setFriendSearch(''); setFriendSearchResults([]); fetchAppFriends(); }
-      else { const d = await res.json(); alert(d.error || 'Failed to add friend'); }
-    } catch (e) {}
+      await remoteAddFriend(username);
+      setFriendSearch(''); setFriendSearchResults([]); fetchAppFriends();
+    } catch (e: any) {
+      alert(e.message || 'Failed to add friend');
+    }
   };
 
   const removeFriend = async (userId: number) => {
     if (!token) return;
     try {
-      await fetch(`/api/friends/${userId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+      await remoteRemoveFriend(userId);
       setAppFriends(prev => prev.filter(f => f.id !== userId));
       setExpandedFriend(null);
     } catch (e) {}
@@ -1665,11 +1694,8 @@ export default function App() {
   const fetchFriendActivity = async (userId: number) => {
     if (!token || friendActivity[userId]) { setExpandedFriend(expandedFriend === userId ? null : userId); return; }
     try {
-      const res = await fetch(`/api/friends/${userId}/recent-games`, { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) {
-        const games = await res.json();
-        setFriendActivity(prev => ({ ...prev, [userId]: games }));
-      }
+      const games = await remoteGetFriendRecentGames(userId);
+      setFriendActivity(prev => ({ ...prev, [userId]: games }));
     } catch (e) {}
     setExpandedFriend(expandedFriend === userId ? null : userId);
   };
@@ -1677,16 +1703,15 @@ export default function App() {
   const fetchNotificationCount = async () => {
     if (!token) return;
     try {
-      const res = await fetch('/api/notifications/count', { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) { const d = await res.json(); setNotificationCount(d.count || 0); }
+      const d = await remoteGetNotifications();
+      setNotificationCount(d.count || 0);
     } catch {}
   };
 
   const fetchPendingRequests = async () => {
     if (!token) return;
     try {
-      const res = await fetch('/api/friends/pending', { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) setPendingRequests(await res.json());
+      setPendingRequests(await remoteGetPendingFriends());
     } catch {}
   };
 
@@ -1694,9 +1719,8 @@ export default function App() {
     setSelectedConvoFriend(friend);
     setFriendsModalTab('messages');
     try {
-      const res = await fetch(`/api/messages/${friend.id}`, { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) setConvoMessages(await res.json());
-      await fetch(`/api/messages/${friend.id}/read`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` } });
+      setConvoMessages(await remoteGetMessages(friend.id));
+      await remoteMarkMessagesRead(friend.id);
       fetchNotificationCount();
     } catch {}
   };
@@ -1706,22 +1730,14 @@ export default function App() {
     const content = convoInput.trim();
     setConvoInput('');
     try {
-      const res = await fetch('/api/messages', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ receiver_id: selectedConvoFriend.id, content }),
-      });
-      if (res.ok) { const msg = await res.json(); setConvoMessages(prev => [...prev, msg]); }
+      const msg = await remoteSendMessage(selectedConvoFriend.id, content);
+      setConvoMessages(prev => [...prev, msg]);
     } catch {}
   };
 
   const sendGameToFriend = async (friendId: number, game: {title: string; steamAppID?: string; artwork?: string}, message?: string) => {
     try {
-      await fetch('/api/messages', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ receiver_id: friendId, content: message || null, game_title: game.title, game_artwork: game.artwork || null, steam_app_id: game.steamAppID || null }),
-      });
+      await remoteSendMessage(friendId, message || undefined, { game_title: game.title, game_artwork: game.artwork || '', steam_app_id: game.steamAppID });
       setShowSharePanel(false); setShareTargetFriend(null); setShareMessageText(''); setShareGameData(null);
     } catch {}
   };
@@ -1729,48 +1745,47 @@ export default function App() {
   const saveAvatar = async () => {
     if (!token) return;
     try {
-      const res = await fetch('/api/user/avatar', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ avatar: avatarInput.trim() || null })
-      });
-      if (res.ok) {
-        const updated = await res.json();
-        setUser(prev => prev ? { ...prev, avatar: updated.avatar } : null);
-        setShowAvatarEdit(false);
-        setAvatarInput('');
-      }
+      const updated = await remoteUpdateAvatar(avatarInput.trim() || '');
+      setUser(prev => prev ? { ...prev, avatar: updated.avatar } : null);
+      setShowAvatarEdit(false);
+      setAvatarInput('');
     } catch (e) {}
   };
 
-    const fetchGameComments = async (gameId: number) => {
+  const saveSettings = async (changes: { username?: string; current_password?: string; new_password?: string; activity_private?: boolean }) => {
+    try {
+      const updated = await remoteUpdateSettings(changes);
+      if (changes.username) setUser(prev => prev ? { ...prev, username: updated.username } : null);
+      if (typeof changes.activity_private === 'boolean') setActivityPrivate(changes.activity_private);
+      setSettingsSaveMsg({ type: 'success', text: 'Saved successfully!' });
+      setSettingsCurrentPwd(''); setSettingsNewPwd(''); setSettingsConfirmPwd('');
+      setTimeout(() => setSettingsSaveMsg(null), 3000);
+    } catch (e: any) {
+      setSettingsSaveMsg({ type: 'error', text: e.message || 'Failed to save' });
+      setTimeout(() => setSettingsSaveMsg(null), 4000);
+    }
+  };
+
+  const fetchGameComments = async (gameId: number) => {
     if (!token) return;
     try {
-      const res = await fetch(`/api/games/${gameId}/comments`, { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) setGameComments(await res.json());
+      setGameComments(await remoteGetComments(gameId));
     } catch (e) {}
   };
 
   const postComment = async (gameId: number) => {
     if (!token || !commentInput.trim()) return;
     try {
-      const res = await fetch(`/api/games/${gameId}/comments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ content: commentInput.trim() })
-      });
-      if (res.ok) {
-        const comment = await res.json();
-        setGameComments(prev => [...prev, comment]);
-        setCommentInput('');
-      }
+      const comment = await remoteAddComment(gameId, commentInput.trim());
+      setGameComments(prev => [...prev, comment]);
+      setCommentInput('');
     } catch (e) {}
   };
 
   const deleteComment = async (commentId: number) => {
     if (!token) return;
     try {
-      await fetch(`/api/games/comments/${commentId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+      await remoteDeleteComment(commentId);
       setGameComments(prev => prev.filter(c => c.id !== commentId));
     } catch (e) {}
   };
@@ -1778,8 +1793,7 @@ export default function App() {
   const fetchGroupOwnership = async (groupId: number) => {
     if (!token) return;
     try {
-      const res = await fetch(`/api/groups/${groupId}/ownership`, { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) setGroupOwnership(await res.json());
+      setGroupOwnership(await remoteGetGroupOwnership(groupId));
     } catch (e) {}
   };
 
@@ -1790,10 +1804,41 @@ export default function App() {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (res.ok) {
-        setLauncherGames(await res.json());
+        const data = await res.json();
+        setLauncherGames(data);
+        // Sync titles to remote so group ownership checks work across users
+        try {
+          const titles = data.map((g: any) => g.title);
+          await remoteSyncLibrary(titles);
+        } catch { /* non-critical */ }
       }
     } catch (e) {
       console.error("Failed to fetch launcher games", e);
+    }
+  };
+
+  const checkInstalls = async () => {
+    if (!token || isCheckingInstalls) return;
+    setIsCheckingInstalls(true);
+    try {
+      const res = await fetch('/api/launcher/check-installs', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const { changed } = await res.json();
+        if (changed.length > 0) {
+          // Apply changes directly to state — no full reload needed
+          setLauncherGames(prev => prev.map(g => {
+            const update = changed.find((c: any) => c.id === g.id);
+            return update ? { ...g, installed: update.installed } : g;
+          }));
+        }
+      }
+    } catch (e) {
+      console.error('check-installs failed', e);
+    } finally {
+      setIsCheckingInstalls(false);
     }
   };
 
@@ -2389,14 +2434,15 @@ export default function App() {
 
   const fetchUser = async () => {
     try {
-      const res = await fetch('/api/auth/me', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) {
-        setUser(await res.json());
-      } else {
-        handleLogout();
-      }
+      const remoteUser = await remoteMe();
+      // Also fetch local user data for platform connections (Steam, Xbox, Discord etc.)
+      let platformData: any = {};
+      try {
+        const localRes = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } });
+        if (localRes.ok) platformData = await localRes.json();
+      } catch { /* local server may not have this user yet - that's ok */ }
+      setUser({ ...platformData, ...remoteUser });
+      setActivityPrivate(!!remoteUser.activity_private);
     } catch (e) {
       handleLogout();
     }
@@ -2404,15 +2450,10 @@ export default function App() {
 
   const fetchGroups = async () => {
     try {
-      const res = await fetch('/api/groups', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setGroups(data);
-        if (data.length> 0 && !activeGroupId) {
-          setActiveGroupId(data[0].id);
-        }
+      const data = await remoteGetGroups();
+      setGroups(data);
+      if (data.length > 0 && !activeGroupId) {
+        setActiveGroupId(data[0].id);
       }
     } catch (e) {
       console.error(e);
@@ -2423,31 +2464,24 @@ export default function App() {
     e.preventDefault();
     setAuthError('');
     try {
-      const res = await fetch(`/api/auth/${authMode}`, {
-        method:'POST',
-        headers: {'Content-Type':'application/json' },
-        body: JSON.stringify({ username: authUsername, password: authPassword })
-      });
-      const data = await res.json();
-      if (res.ok) {
-        // Clear previous account's state before loading new account
-        setGames([]);
-        setGroups([]);
-        setLauncherGames([]);
-        setAppFriends([]);
-        setHomeData(null);
-        setDiscoverData(null);
-        setSuggestedForYou(null);
-        setSteamId('');
-        localStorage.removeItem('steamId');
-        setToken(data.token);
-        localStorage.setItem('token', data.token);
-        setUser(data.user);
-      } else {
-        setAuthError(data.error ||'Authentication failed');
-      }
-    } catch (e) {
-      setAuthError('Network error');
+      const data = authMode === 'register'
+        ? await remoteRegister(authUsername, authPassword)
+        : await remoteLogin(authUsername, authPassword);
+      // Clear previous account's state before loading new account
+      setGames([]);
+      setGroups([]);
+      setLauncherGames([]);
+      setAppFriends([]);
+      setHomeData(null);
+      setDiscoverData(null);
+      setSuggestedForYou(null);
+      setSteamId('');
+      localStorage.removeItem('steamId');
+      setToken(data.token);
+      localStorage.setItem('token', data.token);
+      setUser(data.user);
+    } catch (e: any) {
+      setAuthError(e.message || 'Authentication failed');
     }
   };
 
@@ -2653,20 +2687,11 @@ export default function App() {
     e.preventDefault();
     if (!groupInput.trim()) return;
     try {
-      const res = await fetch('/api/groups', {
-        method:'POST',
-        headers: { 
-'Content-Type':'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ name: groupInput })
-      });
-      if (res.ok) {
-        setGroupInput('');
-        setIsCreatingGroup(false);
-        fetchGroups();
-      }
-    } catch (e) {
+      await remoteCreateGroup(groupInput.trim());
+      setGroupInput('');
+      setIsCreatingGroup(false);
+      fetchGroups();
+    } catch (e: any) {
       console.error(e);
     }
   };
@@ -2675,42 +2700,22 @@ export default function App() {
     e.preventDefault();
     if (!groupInput.trim()) return;
     try {
-      const res = await fetch('/api/groups/join', {
-        method:'POST',
-        headers: {
-'Content-Type':'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ invite_code: groupInput })
-      });
-      if (res.ok) {
-        setGroupInput('');
-        setIsJoiningGroup(false);
-        fetchGroups();
-      } else {
-        const data = await res.json();
-        alert(data.error ||'Failed to join group');
-      }
-    } catch (e) {
-      console.error(e);
+      await remoteJoinGroup(groupInput.trim());
+      setGroupInput('');
+      setIsJoiningGroup(false);
+      fetchGroups();
+    } catch (e: any) {
+      alert(e.message || 'Failed to join group');
     }
   };
 
   const handleDeleteGroup = async (groupId: number) => {
     try {
-      const res = await fetch(`/api/groups/${groupId}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) {
-        if (activeGroupId === groupId) setActiveGroupId(null);
-        fetchGroups();
-      } else {
-        const data = await res.json();
-        alert(data.error || 'Failed to delete group');
-      }
-    } catch (e) {
-      console.error(e);
+      await remoteDeleteGroup(groupId);
+      if (activeGroupId === groupId) setActiveGroupId(null);
+      fetchGroups();
+    } catch (e: any) {
+      alert(e.message || 'Failed to delete group');
     }
   };
 
@@ -2738,15 +2743,30 @@ export default function App() {
     if (!token) return;
     setIsRefreshing(true);
     try {
-      const response = await fetch('/api/games', { 
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `Failed to fetch: ${response.status}`);
+      // Private games from local server
+      const localRes = await fetch('/api/games', { headers: { Authorization: `Bearer ${token}` } });
+      const localData = localRes.ok ? await localRes.json() : [];
+      const privateGames = localData.filter((g: any) => g.list_type === 'private' || !g.list_type);
+
+      // Shared games from remote server
+      let sharedGames: any[] = [];
+      try {
+        sharedGames = await remoteGetSharedGames();
+      } catch (e) {
+        console.warn('Could not fetch shared games from remote:', e);
       }
-      const data = await response.json();
-      setGames(data);
+
+      const merged = [...privateGames, ...sharedGames];
+      setGames(merged);
+
+      // Sync basic stats to remote so friends can see them
+      try {
+        await remoteSyncStats({
+          backlog_count: privateGames.length,
+          library_count: 0, // updated by fetchLauncherGames
+          total_playtime_hours: 0, // updated by fetchLauncherGames
+        });
+      } catch { /* non-critical */ }
     } catch (error: any) {
       console.error('Error fetching games:', error);
     } finally {
@@ -2767,22 +2787,25 @@ export default function App() {
         }
       }
 
-      const response = await fetch('/api/games', {
-        method:'POST',
-        headers: { 
-'Content-Type':'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ ...gameInfo, list_type: addToList, group_id: activeGroupId }),
-      });
+      let ok = false;
+      if (addToList === 'shared') {
+        await remoteAddSharedGame({ ...gameInfo, group_id: activeGroupId });
+        ok = true;
+      } else {
+        const response = await fetch('/api/games', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ ...gameInfo, list_type: addToList, group_id: null }),
+        });
+        ok = response.ok;
+        if (!ok) throw new Error('Failed to save game');
+      }
 
-      if (response.ok) {
+      if (ok) {
         setSearchQuery('');
         setSuggestions([]);
         setIsAdding(false);
         await fetchGames();
-      } else {
-        throw new Error('Failed to save game');
       }
     } catch (error) {
       console.error('Error adding game:', error);
@@ -3107,19 +3130,23 @@ export default function App() {
 
   const deleteGame = async (id: number) => {
     try {
-      const response = await fetch(`/api/games/${id}`, { 
-        method:'DELETE',
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const result = await response.json();
-      
-      if (response.ok && result.success) {
-        setSelectedGame(null);
-        setConfirmDelete(null);
-        await fetchGames();
+      const game = games.find(g => g.id === id);
+      if (game?.list_type === 'shared') {
+        await remoteDeleteSharedGame(id);
       } else {
-        alert('Failed to delete the game. Server returned an error.');
+        const response = await fetch(`/api/games/${id}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+          alert('Failed to delete the game. Server returned an error.');
+          return;
+        }
       }
+      setSelectedGame(null);
+      setConfirmDelete(null);
+      await fetchGames();
     } catch (error) {
       console.error('Error deleting game:', error);
       alert('Network error while deleting game.');
@@ -3327,6 +3354,28 @@ export default function App() {
       return 0;
     });
 
+  const filteredLauncherGames = launcherGames.filter(g => {
+    if (showHiddenGames) { if (!g.hidden) return false; } else { if (g.hidden) return false; }
+    if (launcherSearch) {
+      const q = launcherSearch.toLowerCase();
+      const matchesTitle = g.title.toLowerCase().includes(q);
+      const matchesTags = g.tags ? g.tags.toLowerCase().includes(q) : false;
+      if (!matchesTitle && !matchesTags) return false;
+    }
+    if (!showHiddenGames) {
+      if (launcherInstalledFilter === 'installed') { if (!g.installed) return false; }
+      else if (launcherInstalledFilter === 'not-installed') { if (g.installed) return false; }
+    }
+    if (launcherPlatformFilter !== 'all') {
+      if (g.platform !== launcherPlatformFilter) return false;
+    }
+    if (launcherSelectedTags.length > 0) {
+      const gameTags = g.tags ? g.tags.split(',').map(t => t.trim().toLowerCase()) : [];
+      if (!launcherSelectedTags.every(tag => gameTags.includes(tag.toLowerCase()))) return false;
+    }
+    return true;
+  });
+
   // Map of normalized title -> Epic store URL for currently free Epic games
   const epicFreeMap = new Map<string, string>();
   for (const eg of discoverData?.epicFree ?? []) {
@@ -3395,30 +3444,22 @@ export default function App() {
             className="flex items-center gap-3"
             style={{ WebkitAppRegion:'no-drag' } as React.CSSProperties}
 >
-            {/* User avatar — click to change */}
+            {/* Unified avatar button — opens social + settings panel */}
             <button
-              onClick={() => { setAvatarInput(user?.avatar || ''); setShowAvatarEdit(true); }}
-              className="relative group w-8 h-8 rounded-full overflow-hidden border border-white/10 hover:border-white/40 transition-all focus:outline-none"
-              title="Change avatar"
+              onClick={() => { fetchAppFriends(); fetchPendingRequests(); fetchNotificationCount(); setShowQuestlogFriends(true); }}
+              className="relative group w-9 h-9 rounded-full overflow-hidden border border-white/10 hover:border-white/40 transition-all focus:outline-none"
+              title="Profile, Friends & Settings"
             >
               <img
                 src={user?.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user?.username}`}
                 alt="avatar"
                 className="w-full h-full object-cover"
               />
-              <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                <Camera size={12} className="text-white"/>
+              <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                <Users size={12} className="text-white"/>
               </div>
-            </button>
-
-            <button
-              onClick={() => { fetchAppFriends(); fetchPendingRequests(); fetchNotificationCount(); setShowQuestlogFriends(true); }}
-              className="relative flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-white/50 hover:text-white hover:bg-white/10 transition-all text-[10px] font-bold uppercase tracking-widest"
-              title="Questlog Friends"
-            >
-              <Users size={12}/> Friends
               {notificationCount > 0 && (
-                <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 bg-emerald-500 text-white text-[9px] font-black rounded-full flex items-center justify-center px-1 leading-none">
+                <span className="absolute -top-1 -right-1 min-w-[16px] h-4 bg-emerald-500 text-white text-[9px] font-black rounded-full flex items-center justify-center px-1 leading-none pointer-events-none">
                   {notificationCount > 9 ? '9+' : notificationCount}
                 </span>
               )}
@@ -3494,9 +3535,9 @@ export default function App() {
                 <HorizontalScrollRow title="Jump Back In" icon={<Clock size={24} className="text-emerald-500"/>}>
                   {homeData?.recentlyPlayed?.map((game) => (
                     <motion.div key={game.id} whileHover={{ y: -5 }} onClick={() => { setSelectedGame(game as any); fetchLauncherGameDetails(game.id); }}
-                      className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer border border-white/5 bg-white/5 snap-start shrink-0"
+                      className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
 >
-                      <CachedImg proxyUrl={getSteamHorizontalArtwork(game, artworkRefreshKey)} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" alt={game.title} onError={(e) => {
+                      <CachedImg proxyUrl={getSteamHorizontalArtwork(game, artworkRefreshKey)} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.03]" alt={game.title} onError={(e) => {
                           const target = e.target as HTMLImageElement;
                           if (!target.src.includes(getBannerUrl(game))) {
                             target.src = getBannerUrl(game);
@@ -3521,9 +3562,9 @@ export default function App() {
                 <HorizontalScrollRow title="Suggested from Library" icon={<Library size={24} className="text-blue-500"/>}>
                   {homeData?.suggestedLibrary?.map((game) => (
                     <motion.div key={game.id} whileHover={{ y: -5 }} onClick={() => { setSelectedGame(game as any); fetchLauncherGameDetails(game.id); }}
-                      className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer border border-white/5 bg-white/5 snap-start shrink-0"
+                      className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
 >
-                      <CachedImg proxyUrl={getSteamHorizontalArtwork(game, artworkRefreshKey)} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" alt={game.title} onError={(e) => {
+                      <CachedImg proxyUrl={getSteamHorizontalArtwork(game, artworkRefreshKey)} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]" alt={game.title} onError={(e) => {
                           const target = e.target as HTMLImageElement;
                           if (!target.src.includes(getBannerUrl(game))) {
                             target.src = getBannerUrl(game);
@@ -3548,9 +3589,9 @@ export default function App() {
                 <HorizontalScrollRow title="Suggested from Log" icon={<Gamepad2 size={24} className="text-purple-500"/>}>
                   {homeData?.suggestedLog?.map((game) => (
                     <motion.div key={game.id} whileHover={{ y: -5 }} onClick={() => { setSelectedGame(game as any); fetchQuestlogFriends(game as any); }}
-                      className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer border border-white/5 bg-white/5 snap-start shrink-0"
+                      className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
 >
-                      <CachedImg proxyUrl={getSteamHorizontalArtwork(game, artworkRefreshKey)} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" alt={game.title} onError={(e) => {
+                      <CachedImg proxyUrl={getSteamHorizontalArtwork(game, artworkRefreshKey)} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]" alt={game.title} onError={(e) => {
                           const target = e.target as HTMLImageElement;
                           if (!target.src.includes(getBannerUrl(game))) {
                             target.src = getBannerUrl(game);
@@ -3704,28 +3745,28 @@ export default function App() {
                     <button onClick={() => setShowStatsDetail('library')}
                       className="p-6 bg-blue-500/10 border border-blue-500/20 rounded-3xl text-left hover:bg-blue-500/20 transition-all group"
 >
-                      <Library className="text-blue-500 mb-4 group-hover:scale-110 transition-transform"/>
+                      <Library className="text-blue-500 mb-4 group-hover:scale-[1.03] transition-transform"/>
                       <div className="text-2xl font-black">{homeData?.stats?.libraryCount}</div>
                       <div className="text-xs font-bold text-blue-500/60 uppercase tracking-widest">Library</div>
                     </button>
                     <button onClick={() => { setShowStatsDetail('playtime'); setRevealTotalHours(false); }}
                       className="p-6 bg-emerald-500/10 border border-emerald-500/20 rounded-3xl text-left hover:bg-emerald-500/20 transition-all group"
 >
-                      <Clock className="text-emerald-500 mb-3 group-hover:scale-110 transition-transform"/>
+                      <Clock className="text-emerald-500 mb-3 group-hover:scale-[1.03] transition-transform"/>
                       <div className="text-2xl font-black">{homeData?.stats?.weeklyPlaytimeHours ?? 0}h</div>
                       <div className="text-xs font-bold text-emerald-500/60 uppercase tracking-widest">This Week</div>
                     </button>
                     <button onClick={() => setShowStatsDetail('backlog')}
                       className="p-6 bg-purple-500/10 border border-purple-500/20 rounded-3xl text-left hover:bg-purple-500/20 transition-all group"
 >
-                      <Gamepad2 className="text-purple-500 mb-4 group-hover:scale-110 transition-transform"/>
+                      <Gamepad2 className="text-purple-500 mb-4 group-hover:scale-[1.03] transition-transform"/>
                       <div className="text-2xl font-black">{homeData?.stats?.backlogCount}</div>
                       <div className="text-xs font-bold text-purple-500/60 uppercase tracking-widest">Backlog</div>
                     </button>
                     <button onClick={() => setShowRecentAchievements(true)}
                       className="p-6 bg-orange-500/10 border border-orange-500/20 rounded-3xl text-left hover:bg-orange-500/20 transition-all group"
 >
-                      <Trophy className="text-orange-500 mb-4 group-hover:scale-110 transition-transform"/>
+                      <Trophy className="text-orange-500 mb-4 group-hover:scale-[1.03] transition-transform"/>
                       <div className="text-2xl font-black">{homeData?.recentAchievements?.length}</div>
                       <div className="text-xs font-bold text-orange-500/60 uppercase tracking-widest">Achievements</div>
                     </button>
@@ -3891,7 +3932,7 @@ export default function App() {
                                       <SuggestionThumb steamAppID={getSteamId(game) || undefined} title={game.title} size="w-9 h-9"/>
                                       <div className="min-w-0">
                                         <p className="text-sm font-bold truncate">{game.title}</p>
-                                        <p className="text-[10px] text-white/30 font-mono">{new Date(game.created_at).toLocaleDateString()}</p>
+                                        <p className="text-[10px] text-white/30 font-mono">{new Date(game.created_at).toLocaleDateString('en-GB')}</p>
                                       </div>
                                     </div>
                                   ))}
@@ -4267,7 +4308,7 @@ export default function App() {
                                 {spotlightSteamId ? (
                                   <img
                                     src={`https://shared.steamstatic.com/store_item_assets/steam/apps/${spotlightSteamId}/library_hero.jpg`}
-                                    className="absolute inset-0 w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+                                    className="absolute inset-0 w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]"
                                     onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                                   />
                                 ) : null}
@@ -4307,7 +4348,10 @@ export default function App() {
                                         <p className="text-[11px] font-bold truncate">{game.title}</p>
                                         <p className="text-[10px] text-white/30 font-mono mt-0.5">{game.genre || 'Unknown'}</p>
                                       </div>
-                                      <span className="text-sm font-black tabular-nums" style={{ color: '#f59e0b' }}>{game.lowest_price}</span>
+                                      <div className="flex flex-col items-end">
+                                        {game.previous_price && <span className="text-[9px] font-mono text-white/30 line-through tabular-nums">{game.previous_price}</span>}
+                                        <span className="text-sm font-black tabular-nums" style={{ color: '#f59e0b' }}>{game.lowest_price}</span>
+                                      </div>
                                     </motion.div>
                                   ))}
                                 </div>
@@ -4320,7 +4364,7 @@ export default function App() {
                             <div>
                               <div className="flex items-center gap-2 mb-3">
                                 <XboxIcon className="w-3.5 h-3.5 text-emerald-400"/>
-                                <span className="text-[10px] font-mono uppercase tracking-widest text-white/30">On Game Pass</span>
+                                <span className="text-[10px] font-mono uppercase tracking-widest text-white/30">Now on Game Pass</span>
                               </div>
                               {gamePassGames.length > 0 ? (
                                 <div className="space-y-1">
@@ -4333,7 +4377,7 @@ export default function App() {
                                         <p className="text-[11px] font-bold truncate">{game.title}</p>
                                         <p className="text-[10px] text-white/30 font-mono mt-0.5">{game.genre || 'Unknown'}</p>
                                       </div>
-                                      <span className="text-[10px] font-black text-emerald-400 shrink-0">Free</span>
+                                      <span className="text-[10px] font-mono text-white/30 shrink-0">{game.game_pass_added_at ? new Date(game.game_pass_added_at).toLocaleDateString('en-GB') : ''}</span>
                                     </motion.div>
                                   ))}
                                 </div>
@@ -4586,6 +4630,7 @@ export default function App() {
               <h3 className="text-xl font-bold flex items-center gap-2">
                 <BookOpen size={24} className="text-emerald-500"/>
                 {activeList ==='private' ?'My Backlog' :'Shared Backlog'}
+                <span className="text-sm font-normal text-white/40">{displayedGames.length} games</span>
               </h3>
               <div className="flex items-center gap-2">
                 {(() => {
@@ -4616,7 +4661,6 @@ export default function App() {
                     Hide in Library
                   </button>
                 )}
-                <span className="text-sm text-white/40">{displayedGames.length} games</span>
               </div>
             </div>
 
@@ -4632,8 +4676,8 @@ export default function App() {
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6">
                 {displayedGames.map((game) => (
-                  <motion.div layoutId={`game-container-${game.id}`} key={game.id} onClick={() => { setSelectedGame(game as any); fetchQuestlogFriends(game as any); if (game.list_type === 'shared') { setGameComments([]); fetchGameComments(game.id); } if (game.price_dropped) { fetch(`/api/games/${game.id}/dismiss-price-alert`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` } }); setGames(prev => prev.map(g => g.id === game.id ? { ...g, price_dropped: 0 } : g)); } if ((game as any).game_pass_new) { fetch(`/api/games/${game.id}/dismiss-game-pass-alert`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` } }); setGames(prev => prev.map(g => g.id === game.id ? { ...g, game_pass_new: 0 } : g)); } }}
-                    className="group cursor-pointer" whileHover={{ y: -8 }}
+                  <motion.div layoutId={`game-container-${game.id}`} key={game.id} onClick={() => { setSelectedGame(game as any); fetchQuestlogFriends(game as any); if (game.list_type === 'shared') { setGameComments([]); fetchGameComments(game.id); } if (game.price_dropped) { if (game.list_type === 'shared') { remoteDismissPriceAlert(game.id); } else { fetch(`/api/games/${game.id}/dismiss-price-alert`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` } }); } setGames(prev => prev.map(g => g.id === game.id ? { ...g, price_dropped: 0 } : g)); } if ((game as any).game_pass_new) { if (game.list_type === 'shared') { remoteDismissGamePassAlert(game.id); } else { fetch(`/api/games/${game.id}/dismiss-game-pass-alert`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` } }); } setGames(prev => prev.map(g => g.id === game.id ? { ...g, game_pass_new: 0 } : g)); } }}
+                    className="group cursor-pointer" whileHover={{ y: -8, scale: 1.02 }}
 >
                     {(() => {
                       const owners = groupOwnership?.ownership?.[game.id] ?? [];
@@ -4643,7 +4687,7 @@ export default function App() {
                       const inLibrary = activeList === 'private' && libraryMatchMap.has(game.id);
                       return (
                     <div className={cn("relative aspect-[2/3] overflow-hidden rounded-2xl bg-white/5 transition-all",
-                        allOwn || inLibrary ? "border-2 border-emerald-400" : "border border-white/10")}
+                        allOwn || inLibrary ? "border-2 border-emerald-400" : "ring-1 ring-white/10")}
                       style={allOwn || inLibrary ? { boxShadow: '0 0 0 2px rgba(52,211,153,0.6), 0 0 20px 6px rgba(16,185,129,0.45), 0 0 40px 12px rgba(16,185,129,0.2)' } : undefined}
                     >
                       {game.isFixingArtwork ? (
@@ -4658,7 +4702,7 @@ export default function App() {
                           <span className="text-[10px] bg-white/10 px-2 py-1 rounded text-white/70 font-bold">Click to add artwork</span>
                         </div>
                       ) : (
-                        <img src={game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" referrerPolicy="no-referrer" onError={(e) => {
+                        <img src={game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.03]" referrerPolicy="no-referrer" onError={(e) => {
                             const target = e.target as HTMLImageElement;
                             if (target.src.includes('library_capsule_2x.jpg')) {
                               target.src = target.src.replace('library_capsule_2x.jpg','library_capsule.jpg');
@@ -4680,7 +4724,7 @@ export default function App() {
                       {/* Game Pass new badge */}
                       {(game as any).game_pass_new === 1 && (
                         <div className={cn("absolute z-10 flex items-center gap-1 text-[9px] font-black px-2 py-1 rounded-full backdrop-blur-sm pointer-events-none", game.price_dropped === 1 ? "top-8 left-2" : "top-2 left-2")} style={{ background: 'rgba(16,185,129,0.9)', color: '#fff' }}>
-                          <span className="font-black text-[8px]">GP</span>
+                          <XboxIcon className="w-3 h-3"/>
                           Now on Game Pass
                         </div>
                       )}
@@ -4846,8 +4890,8 @@ export default function App() {
                       className="group relative aspect-[2/3] rounded-2xl overflow-hidden bg-[#1a1a1a] border border-white/10 cursor-pointer shadow-xl"
                       onClick={() => { setSearchQuery(suggestion.title); setCurrentTab('home'); window.scrollTo({ top: 0, behavior:'smooth' }); }}
 >
-                      <img src={suggestion.artwork} alt={suggestion.title} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" referrerPolicy="no-referrer"/>
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-all duration-300 flex flex-col justify-end p-3.5">
+                      <img src={suggestion.artwork} alt={suggestion.title} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.03]" referrerPolicy="no-referrer"/>
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-3.5">
                         <div className="transform translate-y-4 group-hover:translate-y-0 transition-transform duration-300">
                           <h3 className="text-sm font-bold leading-tight mb-1.5">{suggestion.title}</h3>
                           <div className="flex items-center justify-between">
@@ -5018,9 +5062,9 @@ export default function App() {
                     {tagGames.map(game => (
                       <motion.div key={game.id} whileHover={{ y: -6, scale: 1.02 }}
                         onClick={() => handleDiscoverGameClick(game)}
-                        className="group relative w-44 shrink-0 aspect-[2/3] rounded-2xl overflow-hidden cursor-pointer border border-white/5 bg-white/5 snap-start"
+                        className="group relative w-44 shrink-0 aspect-[2/3] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start"
                       >
-                        <img src={game.verticalArt || game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" referrerPolicy="no-referrer"
+                        <img src={game.verticalArt || game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]" referrerPolicy="no-referrer"
                           onError={(e) => {
                             const img = e.target as HTMLImageElement;
                             const sid = game.steamAppID;
@@ -5068,9 +5112,9 @@ export default function App() {
                     {list.map((game) => (
                       <motion.div key={game.id} whileHover={{ y: -6, scale: 1.02 }}
                         onClick={() => handleDiscoverGameClick(game)}
-                        className="group relative w-44 shrink-0 aspect-[2/3] rounded-2xl overflow-hidden cursor-pointer border border-white/5 bg-white/5 snap-start"
+                        className="group relative w-44 shrink-0 aspect-[2/3] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start"
                       >
-                        <img src={game.verticalArt || game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" referrerPolicy="no-referrer"
+                        <img src={game.verticalArt || game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]" referrerPolicy="no-referrer"
                           onError={(e) => {
                             const img = e.target as HTMLImageElement;
                             const sid = (game as any).steamAppID;
@@ -5123,9 +5167,9 @@ export default function App() {
                   ) : suggestedForYou.map((game) => (
                     <motion.div key={game.id} whileHover={{ y: -6, scale: 1.02 }}
                       onClick={() => handleDiscoverGameClick(game)}
-                      className="group relative w-44 shrink-0 aspect-[2/3] rounded-2xl overflow-hidden cursor-pointer border border-white/5 bg-white/5 snap-start"
+                      className="group relative w-44 shrink-0 aspect-[2/3] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start"
                     >
-                      <img src={game.verticalArt || game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" referrerPolicy="no-referrer"
+                      <img src={game.verticalArt || game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]" referrerPolicy="no-referrer"
                         onError={(e) => {
                           const img = e.target as HTMLImageElement;
                           const sid = (game as any).steamAppID;
@@ -5342,40 +5386,38 @@ export default function App() {
                 <div className="flex items-center justify-between">
                   <h3 className="text-xl font-bold flex items-center gap-2">
                     <Library size={24} className="text-blue-500"/>
-                    {showHiddenGames ?'Hidden Games' :'Library'}
+                    {showHiddenGames ? 'Hidden Games' : 'Library'}
+                    <span className="text-sm font-normal text-white/40">{filteredLauncherGames.length} games</span>
                   </h3>
-                  <button onClick={() => setShowHiddenGames(!showHiddenGames)} className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 text-xs font-bold uppercase tracking-widest hover:bg-white/10 transition-all">
-                    {showHiddenGames ? <Eye size={16}/> : <EyeOff size={16}/>}
-                    {showHiddenGames ?'Show Library' :'Show Hidden'}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button onClick={checkInstalls} disabled={isCheckingInstalls}
+                      className={cn("flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold transition-colors border cursor-pointer",
+                        isCheckingInstalls
+                          ? "bg-sky-600 text-white border-sky-500 opacity-70"
+                          : "bg-white/5 text-white/40 border-white/10 hover:border-sky-500/40 hover:text-white/60")}>
+                      {isCheckingInstalls ? <Loader2 size={12} className="animate-spin"/> : <HardDrive size={12}/>}
+                      {isCheckingInstalls ? 'Checking...' : 'Check Installs'}
+                    </button>
+                    <button onClick={() => setShowHiddenGames(!showHiddenGames)}
+                      className={cn("flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold transition-colors border cursor-pointer",
+                        showHiddenGames
+                          ? "bg-violet-600 text-white border-violet-500"
+                          : "bg-white/5 text-white/40 border-white/10 hover:border-violet-500/40 hover:text-white/60")}>
+                      {showHiddenGames ? <Eye size={12}/> : <EyeOff size={12}/>}
+                      {showHiddenGames ? 'Show Library' : 'Show Hidden'}
+                    </button>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
-                  {launcherGames
-                    .filter(g => {
-                      if (showHiddenGames) { if (!g.hidden) return false; } else { if (g.hidden) return false; }
-                      if (launcherSearch) {
-                        const q = launcherSearch.toLowerCase();
-                        const matchesTitle = g.title.toLowerCase().includes(q);
-                        const matchesTags = g.tags ? g.tags.toLowerCase().includes(q) : false;
-                        if (!matchesTitle && !matchesTags) return false;
-                      }
-                      if (!showHiddenGames) {
-                        if (launcherInstalledFilter ==='installed') { if (!g.installed) return false; }
-                        else if (launcherInstalledFilter ==='not-installed') { if (g.installed) return false; }
-                      }
-                      if (launcherPlatformFilter !== 'all') {
-                        if (g.platform !== launcherPlatformFilter) return false;
-                      }
-                      if (launcherSelectedTags.length> 0) {
-                        const gameTags = g.tags ? g.tags.split(',').map(t => t.trim().toLowerCase()) : [];
-                        if (!launcherSelectedTags.every(tag => gameTags.includes(tag.toLowerCase()))) return false;
-                      }
-                      return true;
-                    })
+                  {filteredLauncherGames
                     .map(game => (
-                      <motion.div key={game.id} layoutId={`launcher-game-${game.id}`} whileHover={{ y: -8 }} onClick={() => { setSelectedGame(game as any); fetchLauncherGameDetails(game.id); }}
-                        className="group relative aspect-[2/3] rounded-2xl overflow-hidden bg-[#1a1a1a] border border-white/10 shadow-lg cursor-pointer"
+                      <motion.div
+                        key={game.id}
+                        layoutId={`launcher-game-${game.id}`}
+                        whileHover={{ y: -8, scale: 1.02 }}
+                        onClick={() => { setSelectedGame(game as any); fetchLauncherGameDetails(game.id); }}
+                        className="group relative aspect-[2/3] rounded-2xl overflow-hidden bg-[#1a1a1a] shadow-lg ring-1 ring-white/10 cursor-pointer"
 >
                         <div className="absolute inset-0 bg-white/5 group-hover:bg-white/10 transition-colors"/>
                         {!game.installed && (
@@ -5386,7 +5428,7 @@ export default function App() {
                             </div>
                           </div>
                         )}
-                        <img src={game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" referrerPolicy="no-referrer" onError={(e) => {
+                        <img src={game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.03]" referrerPolicy="no-referrer" onError={(e) => {
                             const target = e.target as HTMLImageElement;
                             if (target.src.includes('library_capsule_2x.jpg')) {
                               target.src = target.src.replace('library_capsule_2x.jpg','library_capsule.jpg');
@@ -5397,7 +5439,7 @@ export default function App() {
                             }
                           }}
 />
-                        <div className="absolute inset-0 z-20 bg-gradient-to-t from-black/95 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-all duration-300 p-4 flex flex-col justify-end">
+                        <div className="absolute inset-0 z-20 bg-gradient-to-t from-black/95 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 p-4 flex flex-col justify-end">
                           <div className="transform translate-y-4 group-hover:translate-y-0 transition-transform duration-300">
                             <h3 className="font-bold text-sm leading-tight mb-2 drop-shadow-lg line-clamp-2">{game.title}</h3>
                             <div className="flex items-center justify-between">
@@ -5732,7 +5774,7 @@ export default function App() {
 />
                 )}
                 {/* Gradient overlay */}
-                <div className="absolute inset-0 bg-gradient-to-t from-[#1a1a1a] via-[#1a1a1a]/10 to-transparent pointer-events-none"/>
+                <div className="absolute inset-0 bottom-[-2px] bg-gradient-to-t from-[#1a1a1a] via-[#1a1a1a]/10 to-transparent pointer-events-none"/>
 
                 {/* Share + Close buttons */}
                 <div className="absolute top-4 right-4 z-50 flex items-center gap-2" style={{ pointerEvents:'all' }}>
@@ -5972,12 +6014,12 @@ export default function App() {
                         <span className="text-[9px] font-mono uppercase opacity-40 tracking-widest">Last Played</span>
                         <span className="text-xs font-bold">
                           {(selectedGame as LauncherGame).last_played
-                            ? new Date((selectedGame as LauncherGame).last_played!).toLocaleDateString()
+                            ? new Date((selectedGame as LauncherGame).last_played!).toLocaleDateString('en-GB')
                             : 'Never'}
                         </span>
                       </div>
                     )}
-                    {'steam_rating' in selectedGame && selectedGame.steam_rating ? (
+                    {!('playtime' in selectedGame) && ('steam_rating' in selectedGame && selectedGame.steam_rating ? (
                       <div className="flex flex-col">
                         <span className="text-[9px] font-mono uppercase opacity-40 tracking-widest flex items-center gap-1"><SteamIcon className="w-2.5 h-2.5"/>Rating</span>
                         <span className="text-xs font-bold text-[#66c0f4]">{selectedGame.steam_rating}</span>
@@ -5989,7 +6031,7 @@ export default function App() {
                           {(selectedGame as any).steam_url ? (selectedGame as any).metacritic : ((selectedGame as any).metacritic / 10).toFixed(1)}
                         </span>
                       </div>
-                    ) : null}
+                    ) : null)}
                   </div>
 
                   {(selectedGame as any)._enriching && !selectedGame.description && (
@@ -6021,10 +6063,21 @@ export default function App() {
                         <button onClick={() => {
                             if (isInstalled) { handleLaunch(selectedGame as LauncherGame); }
                             else {
-                              if (platform ==='steam') window.location.href = `steam://install/${(selectedGame as LauncherGame).external_id}`;
-                              else if (platform ==='xbox') window.open(`https://www.xbox.com/en-GB/games/store/game/${(selectedGame as LauncherGame).external_id}`,'_blank');
-                              else if (platform ==='ea') window.open('https://www.ea.com/ea-app', '_blank');
-                              handleToggleInstalled(selectedGame.id, true);
+                              if (platform ==='steam') {
+                                window.location.href = `steam://install/${(selectedGame as LauncherGame).external_id}`;
+                              } else if (platform === 'epic') {
+                                const installUrl = (selectedGame as LauncherGame).launch_path?.replace('action=launch', 'action=install');
+                                if (installUrl) openInBrowser(installUrl);
+                                // Don't mark as installed — Epic scan will detect it once actually done
+                              } else if (platform ==='xbox') {
+                                window.open(`https://www.xbox.com/en-GB/games/store/game/${(selectedGame as LauncherGame).external_id}`,'_blank');
+                                handleToggleInstalled(selectedGame.id, true);
+                              } else if (platform ==='ea') {
+                                window.open('https://www.ea.com/ea-app', '_blank');
+                                handleToggleInstalled(selectedGame.id, true);
+                              } else {
+                                handleToggleInstalled(selectedGame.id, true);
+                              }
                             }
                           }}
                           className={cn("flex items-center justify-between p-3 rounded-2xl transition-all cursor-pointer", isInstalled ?"bg-white text-[#141414] hover:bg-white/90" :"bg-emerald-600 text-white hover:bg-emerald-500")}
@@ -6197,10 +6250,20 @@ export default function App() {
                         <button onClick={() => {
                             if (isInstalled) { handleLaunch(libMatch); }
                             else {
-                              if (platform === 'steam') window.location.href = `steam://install/${libMatch.external_id}`;
-                              else if (platform === 'xbox') window.open(`https://www.xbox.com/en-GB/games/store/game/${libMatch.external_id}`, '_blank');
-                              else if (platform === 'ea') window.open('https://www.ea.com/ea-app', '_blank');
-                              handleToggleInstalled(libMatch.id, true);
+                              if (platform === 'steam') {
+                                window.location.href = `steam://install/${libMatch.external_id}`;
+                              } else if (platform === 'epic') {
+                                const installUrl = libMatch.launch_path?.replace('action=launch', 'action=install');
+                                if (installUrl) openInBrowser(installUrl);
+                              } else if (platform === 'xbox') {
+                                window.open(`https://www.xbox.com/en-GB/games/store/game/${libMatch.external_id}`, '_blank');
+                                handleToggleInstalled(libMatch.id, true);
+                              } else if (platform === 'ea') {
+                                window.open('https://www.ea.com/ea-app', '_blank');
+                                handleToggleInstalled(libMatch.id, true);
+                              } else {
+                                handleToggleInstalled(libMatch.id, true);
+                              }
                             }
                           }}
                           className={cn("flex items-center justify-between p-3 rounded-2xl transition-all cursor-pointer", isInstalled ? "bg-white text-[#141414] hover:bg-white/90" : "bg-emerald-600 text-white hover:bg-emerald-500")}>
@@ -6342,7 +6405,7 @@ export default function App() {
                             <div className="flex-1 min-w-0">
                               <div className="flex items-baseline gap-2">
                                 <span className="text-[11px] font-bold text-white/80">{c.username}</span>
-                                <span className="text-[9px] text-white/20 font-mono">{new Date(c.created_at).toLocaleDateString()}</span>
+                                <span className="text-[9px] text-white/20 font-mono">{new Date(c.created_at).toLocaleDateString('en-GB')}</span>
                                 {c.user_id === user?.id && (
                                   <button onClick={() => deleteComment(c.id)} className="text-[9px] text-white/20 hover:text-red-400 transition-colors ml-auto">delete</button>
                                 )}
@@ -6368,7 +6431,7 @@ export default function App() {
 
                   {!(selectedGame as any)._external && (
                   <div className="pt-5 border-t border-white/5 flex items-center justify-between">
-                    <p className="text-[9px] font-mono uppercase tracking-[0.2em] opacity-20">Added {new Date(selectedGame.created_at).toLocaleDateString()}</p>
+                    <p className="text-[9px] font-mono uppercase tracking-[0.2em] opacity-20">Added {new Date(selectedGame.created_at).toLocaleDateString('en-GB')}</p>
                     {(() => {
                       const isLauncher ='playtime' in selectedGame;
                       const isInstalled = isLauncher && (selectedGame as LauncherGame).installed;
@@ -6427,7 +6490,7 @@ export default function App() {
               <div className="overflow-y-auto flex-1 space-y-3 custom-scrollbar">
                 {friendsWhoOwn.length> 0 ? friendsWhoOwn.map((f, idx) => {
                   const lastPlayedStr = f.last_played
-                    ? new Date(f.last_played * 1000).toLocaleDateString()
+                    ? new Date(f.last_played * 1000).toLocaleDateString('en-GB')
                     : undefined;
                   return (
                     <FriendRow
@@ -6479,7 +6542,7 @@ export default function App() {
                       <p className="text-xs opacity-60 truncate">{ach.description || (ach.unlocked ?'Achievement unlocked!' :'Hidden achievement')}</p>
                       </div>
                       {ach.unlocked && ach.unlockTime ? (
-                        <div className="text-[10px] font-mono opacity-40 shrink-0 text-right"><p>{new Date(ach.unlockTime * 1000).toLocaleDateString()}</p></div>
+                        <div className="text-[10px] font-mono opacity-40 shrink-0 text-right"><p>{new Date(ach.unlockTime * 1000).toLocaleDateString('en-GB')}</p></div>
                       ) : (
                         <div className="text-[10px] font-mono opacity-40 shrink-0 text-right"><Lock size={12}/></div>
                       )}
@@ -6579,7 +6642,7 @@ export default function App() {
                         <XboxIcon className="w-4 h-4 text-[#107c10]"/>
                       ) : null}
                       {ach.unlockTime ? (
-                        <p className="text-[9px] font-mono text-white/30">{new Date(ach.unlockTime * 1000).toLocaleDateString()}</p>
+                        <p className="text-[9px] font-mono text-white/30">{new Date(ach.unlockTime * 1000).toLocaleDateString('en-GB')}</p>
                       ) : null}
                     </div>
                   </div>
@@ -6719,16 +6782,28 @@ export default function App() {
             {/* Header */}
             <div className="flex items-center justify-between p-5 border-b border-white/10 shrink-0">
               <div className="flex items-center gap-3">
-                <h2 className="text-lg font-bold flex items-center gap-2"><Users size={18} className="text-emerald-500"/>Questlog Friends</h2>
+                {/* User avatar + name — click avatar to go to settings */}
+                <button
+                  onClick={() => { setAvatarInput(user?.avatar || ''); setFriendsModalTab('settings'); }}
+                  className="relative group w-9 h-9 rounded-full overflow-hidden border border-white/15 hover:border-white/40 transition-all shrink-0 focus:outline-none"
+                  title="Edit profile"
+                >
+                  <img src={user?.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user?.username}`} className="w-full h-full object-cover"/>
+                  <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                    <Camera size={10} className="text-white"/>
+                  </div>
+                </button>
+                <span className="text-sm font-bold text-white/80 mr-1">{user?.username}</span>
                 <div className="flex items-center bg-white/5 p-0.5 rounded-full border border-white/10">
                   <button onClick={() => setFriendsModalTab('friends')} className={cn("px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer", friendsModalTab === 'friends' ? "bg-white text-[#141414]" : "text-white/50 hover:text-white")}>Friends</button>
                   <button onClick={() => { setFriendsModalTab('messages'); fetchNotificationCount(); }} className={cn("relative px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer", friendsModalTab === 'messages' ? "bg-white text-[#141414]" : "text-white/50 hover:text-white")}>
                     Messages
                     {notificationCount > 0 && <span className="absolute -top-1 -right-1 min-w-[14px] h-3.5 bg-emerald-500 text-white text-[8px] font-black rounded-full flex items-center justify-center px-0.5">{notificationCount > 9 ? '9+' : notificationCount}</span>}
                   </button>
+                  <button onClick={() => setFriendsModalTab('settings')} className={cn("px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer", friendsModalTab === 'settings' ? "bg-white text-[#141414]" : "text-white/50 hover:text-white")}>Settings</button>
                 </div>
               </div>
-              <button onClick={() => { setShowQuestlogFriends(false); setSelectedConvoFriend(null); }} className="p-2 rounded-full hover:bg-white/10 transition-colors cursor-pointer"><X size={18}/></button>
+              <button onClick={() => { setShowQuestlogFriends(false); setSelectedConvoFriend(null); setSettingsSaveMsg(null); }} className="p-2 rounded-full hover:bg-white/10 transition-colors cursor-pointer"><X size={18}/></button>
             </div>
 
             {/* ── Friends tab ── */}
@@ -6898,6 +6973,99 @@ export default function App() {
                       </div>
                     </div>
                   </>)}
+                </div>
+              </div>
+            )}
+
+            {/* ── Settings tab ── */}
+            {friendsModalTab === 'settings' && (
+              <div className="flex-1 overflow-y-auto p-6 space-y-7">
+                {settingsSaveMsg && (
+                  <div className={cn("px-4 py-2.5 rounded-xl text-sm font-medium text-center", settingsSaveMsg.type === 'success' ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/20" : "bg-red-500/15 text-red-400 border border-red-500/20")}>
+                    {settingsSaveMsg.text}
+                  </div>
+                )}
+
+                {/* Avatar */}
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 mb-3">Avatar</p>
+                  <div className="flex items-center gap-4">
+                    <img src={avatarInput || user?.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user?.username}`} className="w-14 h-14 rounded-full object-cover border border-white/15 shrink-0"/>
+                    <div className="flex-1 space-y-2">
+                      <input type="text" placeholder="Paste image URL..." value={avatarInput} onChange={e => setAvatarInput(e.target.value)}
+                        className="w-full bg-white/5 border border-white/10 rounded-full py-2 px-4 text-sm focus:outline-none focus:border-white/30 transition-all"
+                      />
+                      <div className="flex gap-2">
+                        <button onClick={() => { setAvatarInput(''); saveAvatar(); }} className="flex-1 py-1.5 rounded-full bg-white/5 border border-white/10 text-[10px] font-bold uppercase tracking-widest text-white/40 hover:bg-white/10 transition-colors cursor-pointer">Remove</button>
+                        <button onClick={saveAvatar} className="flex-1 py-1.5 rounded-full bg-emerald-600 text-white text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-500 transition-colors cursor-pointer">Save Avatar</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Privacy */}
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 mb-3">Privacy</p>
+                  <div className="flex items-center justify-between px-4 py-3.5 rounded-2xl bg-white/5 border border-white/10">
+                    <div>
+                      <p className="text-sm font-medium">Hide activity from friends</p>
+                      <p className="text-[10px] text-white/30 mt-0.5">Friends won't see your log activity or recent games</p>
+                    </div>
+                    <button
+                      onClick={() => { const next = !activityPrivate; setActivityPrivate(next); saveSettings({ activity_private: next }); }}
+                      className={cn("shrink-0 ml-4 rounded-full transition-colors cursor-pointer flex items-center", activityPrivate ? "bg-emerald-500" : "bg-white/15")}
+                      style={{ width: 40, height: 22, minWidth: 40, padding: '3px' }}
+                    >
+                      <span className={cn("w-4 h-4 rounded-full bg-white shadow transition-transform block", activityPrivate ? "translate-x-[18px]" : "translate-x-0")}/>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Change username */}
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 mb-3">Username</p>
+                  <div className="flex gap-2">
+                    <input type="text" placeholder={user?.username || 'New username'} value={settingsUsername} onChange={e => setSettingsUsername(e.target.value)}
+                      className="flex-1 bg-white/5 border border-white/10 rounded-full py-2 px-4 text-sm focus:outline-none focus:border-white/30 transition-all"
+                    />
+                    <button
+                      onClick={() => { if (settingsUsername.trim()) { saveSettings({ username: settingsUsername.trim() }); setSettingsUsername(''); } }}
+                      disabled={!settingsUsername.trim()}
+                      className="px-4 py-2 rounded-full bg-emerald-600 text-white text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-500 transition-colors disabled:opacity-30 cursor-pointer shrink-0"
+                    >Save</button>
+                  </div>
+                </div>
+
+                {/* Change password */}
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 mb-3">Password</p>
+                  <div className="space-y-2">
+                    <input type="password" placeholder="Current password" value={settingsCurrentPwd} onChange={e => setSettingsCurrentPwd(e.target.value)}
+                      className="w-full bg-white/5 border border-white/10 rounded-full py-2 px-4 text-sm focus:outline-none focus:border-white/30 transition-all"
+                    />
+                    <input type="password" placeholder="New password" value={settingsNewPwd} onChange={e => setSettingsNewPwd(e.target.value)}
+                      className="w-full bg-white/5 border border-white/10 rounded-full py-2 px-4 text-sm focus:outline-none focus:border-white/30 transition-all"
+                    />
+                    <input type="password" placeholder="Confirm new password" value={settingsConfirmPwd} onChange={e => setSettingsConfirmPwd(e.target.value)}
+                      className="w-full bg-white/5 border border-white/10 rounded-full py-2 px-4 text-sm focus:outline-none focus:border-white/30 transition-all"
+                    />
+                    <button
+                      onClick={() => {
+                        if (!settingsCurrentPwd || !settingsNewPwd) return;
+                        if (settingsNewPwd !== settingsConfirmPwd) { setSettingsSaveMsg({ type: 'error', text: "Passwords don't match" }); setTimeout(() => setSettingsSaveMsg(null), 4000); return; }
+                        saveSettings({ current_password: settingsCurrentPwd, new_password: settingsNewPwd });
+                      }}
+                      disabled={!settingsCurrentPwd || !settingsNewPwd || !settingsConfirmPwd}
+                      className="w-full py-2 rounded-full bg-emerald-600 text-white text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-500 transition-colors disabled:opacity-30 cursor-pointer"
+                    >Change Password</button>
+                  </div>
+                </div>
+
+                {/* Sign out */}
+                <div className="pt-2 border-t border-white/10">
+                  <button onClick={handleLogout} className="w-full py-2.5 rounded-full bg-red-500/10 border border-red-500/20 text-red-400 text-[10px] font-bold uppercase tracking-widest hover:bg-red-500/20 transition-colors cursor-pointer">
+                    Sign Out
+                  </button>
                 </div>
               </div>
             )}

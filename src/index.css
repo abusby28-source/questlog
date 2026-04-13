@@ -11,6 +11,13 @@
     to { transform: rotate(360deg); }
   }
   --animate-spin-once: spin-once 0.5s ease-in-out;
+
+  /* Skeleton shimmer — richer than pulse, moves left → right */
+  @keyframes shimmer {
+    0%   { background-position: -200% center; }
+    100% { background-position:  200% center; }
+  }
+  --animate-shimmer: shimmer 1.6s linear infinite;
 }
 
 /* Custom Scrollbar */
@@ -44,4 +51,25 @@
 .hide-scrollbar {
   -ms-overflow-style: none;
   scrollbar-width: none;
+}
+
+/* Moving shimmer for skeleton loaders */
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(255,255,255,0.04) 25%,
+    rgba(255,255,255,0.10) 50%,
+    rgba(255,255,255,0.04) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+/* Smooth image fade-in helper */
+.img-load {
+  opacity: 0;
+  transition: opacity 0.45s ease;
+}
+.img-load.loaded {
+  opacity: 1;
 }

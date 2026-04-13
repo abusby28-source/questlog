@@ -554,6 +554,20 @@ app.get("/health", (_, res) => res.json({ ok: true, version: "1.0.0" }));
 // ── Start ─────────────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3001;
-initDb()
-  .then(() => app.listen(PORT, () => console.log(`QuestLog remote server running on port ${PORT}`)))
-  .catch(e => { console.error("DB init failed:", e); process.exit(1); });
+
+async function initDbWithRetry(attempt = 1) {
+  try {
+    await initDb();
+    console.log("DB ready.");
+  } catch (e) {
+    const delay = Math.min(5000 * attempt, 60000);
+    console.error(`DB init failed (attempt ${attempt}), retrying in ${delay / 1000}s:`, e.message);
+    setTimeout(() => initDbWithRetry(attempt + 1), delay);
+  }
+}
+
+// Start immediately so Railway health checks pass, retry DB in background
+app.listen(PORT, () => {
+  console.log(`QuestLog remote server listening on port ${PORT}`);
+  initDbWithRetry();
+});

@@ -65,6 +65,15 @@
   animation: shimmer 1.6s linear infinite;
 }
 
+/* Fix subpixel rendering artifacts at border-radius edges.
+   overflow-hidden + border-radius + child scale transforms causes a 1px gap
+   in Chromium where the clip boundary doesn't perfectly align. Forcing GPU
+   compositing via backface-visibility eliminates this. */
+.overflow-hidden {
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
 /* Smooth image fade-in helper */
 .img-load {
   opacity: 0;

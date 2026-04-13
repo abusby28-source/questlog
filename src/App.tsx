@@ -18,7 +18,7 @@ import { fetchGameInfo, GameInfo, getGameSuggestions, GameSuggestion, fetchSimil
 import {
   remoteLogin, remoteRegister, remoteMe,
   remoteUpdateAvatar, remoteUpdateSettings, remoteUpdateStatus,
-  remoteSyncStats, remoteSyncLibrary,
+  remoteSyncStats, remoteSyncLibrary, remoteBackupLibrary, remoteRestoreLibrary,
   remoteSearchUsers,
   remoteGetFriends, remoteGetPendingFriends, remoteAddFriend, remoteRemoveFriend,
   remoteGetFriendRecentGames, remoteGetFriendStats,
@@ -2746,7 +2746,24 @@ export default function App() {
       // Private games from local server
       const localRes = await fetch('/api/games', { headers: { Authorization: `Bearer ${token}` } });
       const localData = localRes.ok ? await localRes.json() : [];
-      const privateGames = localData.filter((g: any) => g.list_type === 'private' || !g.list_type);
+      let privateGames = localData.filter((g: any) => g.list_type === 'private' || !g.list_type);
+
+      // If local is empty, try restoring from remote backup
+      if (privateGames.length === 0) {
+        try {
+          const remoteGames = await remoteRestoreLibrary();
+          if (remoteGames.length > 0) {
+            await fetch('/api/games/restore', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ games: remoteGames }),
+            });
+            const restoredRes = await fetch('/api/games', { headers: { Authorization: `Bearer ${token}` } });
+            const restoredData = restoredRes.ok ? await restoredRes.json() : [];
+            privateGames = restoredData.filter((g: any) => g.list_type === 'private' || !g.list_type);
+          }
+        } catch { /* non-critical */ }
+      }
 
       // Shared games from remote server
       let sharedGames: any[] = [];
@@ -2758,6 +2775,16 @@ export default function App() {
 
       const merged = [...privateGames, ...sharedGames];
       setGames(merged);
+
+      // Backup private library to remote (fire and forget)
+      if (privateGames.length > 0) {
+        remoteBackupLibrary(privateGames.map((g: any) => ({
+          title: g.title, artwork: g.artwork, banner: g.banner, horizontal_grid: g.horizontal_grid,
+          genre: g.genre, tags: g.tags, description: g.description, steam_url: g.steam_url,
+          game_pass: g.game_pass, status: g.status, list_type: g.list_type,
+          release_date: g.release_date, metacritic: g.metacritic, steam_rating: g.steam_rating,
+        }))).catch(() => {/* non-critical */});
+      }
 
       // Sync basic stats to remote so friends can see them
       try {

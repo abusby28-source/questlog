@@ -6731,6 +6731,35 @@ async function getIgdbToken() {
     res.json(games);
   });
 
+  // Bulk restore from remote backup — only inserts, never overwrites existing data
+  app.post("/api/games/restore", authenticateToken, (req, res) => {
+    const { games } = req.body;
+    if (!Array.isArray(games) || games.length === 0) return res.json({ restored: 0 });
+    const existing = db.prepare("SELECT COUNT(*) as count FROM games WHERE user_id = ?").get(req.user.id) as { count: number };
+    if (existing.count > 0) return res.json({ restored: 0, skipped: true });
+    let restored = 0;
+    const insert = db.prepare(`
+      INSERT OR IGNORE INTO games
+        (title, artwork, banner, horizontal_grid, genre, tags, description, steam_url,
+         game_pass, status, list_type, release_date, metacritic, steam_rating, user_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `);
+    const insertMany = db.transaction((rows: any[]) => {
+      for (const g of rows) {
+        insert.run(
+          g.title, g.artwork || null, g.banner || null, g.horizontal_grid || null,
+          g.genre || null, g.tags || null, g.description || null, g.steam_url || null,
+          g.game_pass ? 1 : 0, g.status || 'to-play', g.list_type || 'private',
+          g.release_date || null, g.metacritic || null, g.steam_rating || null,
+          req.user.id
+        );
+        restored++;
+      }
+    });
+    insertMany(games);
+    res.json({ restored });
+  });
+
   app.get("/api/games/:id", authenticateToken, (req, res) => {
     try {
       const game = db.prepare("SELECT * FROM games WHERE id = ? AND (user_id = ? OR group_id IN (SELECT group_id FROM group_members WHERE user_id = ?))").get(Number(req.params.id), req.user.id, req.user.id);

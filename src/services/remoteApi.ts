@@ -59,6 +59,12 @@ export const remoteSyncStats = (stats: { library_count: number; backlog_count: n
 export const remoteSyncLibrary = (titles: string[]) =>
   put('/api/user/sync-library', { titles });
 
+export const remoteBackupLibrary = (games: any[]) =>
+  put<{ ok: boolean; count: number }>('/api/user/library/backup', { games });
+
+export const remoteRestoreLibrary = () =>
+  get<any[]>('/api/user/library/backup');
+
 export const remoteSearchUsers = (q: string) =>
   get<any[]>(`/api/users/search?q=${encodeURIComponent(q)}`);
 

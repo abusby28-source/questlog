@@ -143,6 +143,29 @@ async function initDb() {
 
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS activity_private BOOLEAN DEFAULT false`);
 
+  await query(`
+    CREATE TABLE IF NOT EXISTS user_library (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      artwork TEXT,
+      banner TEXT,
+      horizontal_grid TEXT,
+      genre TEXT,
+      tags TEXT,
+      description TEXT,
+      steam_url TEXT,
+      game_pass BOOLEAN DEFAULT false,
+      status TEXT DEFAULT 'to-play',
+      list_type TEXT DEFAULT 'private',
+      release_date TEXT,
+      metacritic INTEGER,
+      steam_rating TEXT,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(user_id, title)
+    )
+  `);
+
   console.log("Database ready.");
 }
 
@@ -274,6 +297,71 @@ app.put("/api/user/sync-library", authenticate, async (req, res) => {
     await query("INSERT INTO library_cache (user_id, title) VALUES ($1, $2) ON CONFLICT DO NOTHING", [req.user.id, title.toLowerCase().trim()]);
   }
   res.json({ ok: true });
+});
+
+// ── Library backup / restore ───────────────────────────────────────────────────
+
+app.put("/api/user/library/backup", authenticate, async (req, res) => {
+  const { games } = req.body;
+  if (!Array.isArray(games)) return res.status(400).json({ error: "games must be an array" });
+  try {
+    for (const g of games) {
+      await query(
+        `INSERT INTO user_library
+          (user_id, title, artwork, banner, horizontal_grid, genre, tags, description,
+           steam_url, game_pass, status, list_type, release_date, metacritic, steam_rating, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())
+         ON CONFLICT (user_id, title) DO UPDATE SET
+          artwork = EXCLUDED.artwork,
+          banner = EXCLUDED.banner,
+          horizontal_grid = EXCLUDED.horizontal_grid,
+          genre = EXCLUDED.genre,
+          tags = EXCLUDED.tags,
+          description = EXCLUDED.description,
+          steam_url = EXCLUDED.steam_url,
+          game_pass = EXCLUDED.game_pass,
+          status = EXCLUDED.status,
+          list_type = EXCLUDED.list_type,
+          release_date = EXCLUDED.release_date,
+          metacritic = EXCLUDED.metacritic,
+          steam_rating = EXCLUDED.steam_rating,
+          updated_at = NOW()`,
+        [
+          req.user.id, g.title, g.artwork || null, g.banner || null, g.horizontal_grid || null,
+          g.genre || null, g.tags || null, g.description || null, g.steam_url || null,
+          g.game_pass || false, g.status || 'to-play', g.list_type || 'private',
+          g.release_date || null, g.metacritic || null, g.steam_rating || null,
+        ]
+      );
+    }
+    // Remove any remote entries that were deleted locally
+    if (games.length > 0) {
+      const titles = games.map(g => g.title);
+      await query(
+        `DELETE FROM user_library WHERE user_id = $1 AND title != ALL($2)`,
+        [req.user.id, titles]
+      );
+    }
+    res.json({ ok: true, count: games.length });
+  } catch (e) {
+    console.error("Library backup error:", e);
+    res.status(500).json({ error: "Failed to backup library" });
+  }
+});
+
+app.get("/api/user/library/backup", authenticate, async (req, res) => {
+  try {
+    const result = await rows(
+      `SELECT title, artwork, banner, horizontal_grid, genre, tags, description,
+              steam_url, game_pass, status, list_type, release_date, metacritic, steam_rating
+       FROM user_library WHERE user_id = $1 ORDER BY updated_at DESC`,
+      [req.user.id]
+    );
+    res.json(result);
+  } catch (e) {
+    console.error("Library restore error:", e);
+    res.status(500).json({ error: "Failed to fetch library" });
+  }
 });
 
 app.get("/api/users/search", authenticate, async (req, res) => {

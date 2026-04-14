@@ -166,6 +166,16 @@ async function initDb() {
     )
   `);
 
+  await query(`
+    CREATE TABLE IF NOT EXISTS group_messages (
+      id SERIAL PRIMARY KEY,
+      group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      content TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
   console.log("Database ready.");
 }
 
@@ -647,6 +657,59 @@ app.post("/api/messages", authenticate, async (req, res) => {
 app.patch("/api/messages/:friendId/read", authenticate, async (req, res) => {
   await query("UPDATE messages SET is_read=true WHERE sender_id=$1 AND receiver_id=$2", [parseInt(req.params.friendId), req.user.id]);
   res.json({ ok: true });
+});
+
+// ── Group message routes ───────────────────────────────────────────────────────
+
+app.get("/api/groups/:id/messages", authenticate, async (req, res) => {
+  const gid = parseInt(req.params.id);
+  const isMember = await row("SELECT 1 FROM group_members WHERE group_id=$1 AND user_id=$2", [gid, req.user.id]);
+  if (!isMember) return res.status(403).json({ error: "Not a group member" });
+  const result = await rows(
+    `SELECT gm.*, u.username AS sender_username, u.avatar AS sender_avatar
+     FROM group_messages gm JOIN users u ON u.id = gm.sender_id
+     WHERE gm.group_id = $1 ORDER BY gm.created_at ASC`,
+    [gid]
+  );
+  res.json(result);
+});
+
+app.post("/api/groups/:id/messages", authenticate, async (req, res) => {
+  const gid = parseInt(req.params.id);
+  const { content } = req.body;
+  if (!content?.trim()) return res.status(400).json({ error: "Message cannot be empty" });
+  const isMember = await row("SELECT 1 FROM group_members WHERE group_id=$1 AND user_id=$2", [gid, req.user.id]);
+  if (!isMember) return res.status(403).json({ error: "Not a group member" });
+  const inserted = await row(
+    "INSERT INTO group_messages (group_id, sender_id, content) VALUES ($1,$2,$3) RETURNING id",
+    [gid, req.user.id, content.trim()]
+  );
+  const msg = await row(
+    `SELECT gm.*, u.username AS sender_username, u.avatar AS sender_avatar
+     FROM group_messages gm JOIN users u ON u.id = gm.sender_id WHERE gm.id = $1`,
+    [inserted.id]
+  );
+  res.json(msg);
+});
+
+// ── Common games ───────────────────────────────────────────────────────────────
+
+app.get("/api/friends/:id/common-games", authenticate, async (req, res) => {
+  const fid = parseInt(req.params.id);
+  const areFriends = await row(
+    `SELECT 1 FROM friendships WHERE (requester_id=$1 AND addressee_id=$2) OR (requester_id=$2 AND addressee_id=$1)`,
+    [req.user.id, fid]
+  );
+  if (!areFriends) return res.status(403).json({ error: "Not friends" });
+  const result = await rows(
+    `SELECT ul1.title, ul1.artwork, ul1.status
+     FROM user_library ul1
+     INNER JOIN user_library ul2 ON LOWER(ul1.title) = LOWER(ul2.title)
+     WHERE ul1.user_id = $1 AND ul2.user_id = $2
+     ORDER BY ul1.title`,
+    [req.user.id, fid]
+  );
+  res.json(result);
 });
 
 // ── Health check ──────────────────────────────────────────────────────────────

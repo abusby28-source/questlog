@@ -65,13 +65,26 @@
   animation: shimmer 1.6s linear infinite;
 }
 
-/* Fix subpixel rendering artifacts at border-radius edges.
-   overflow-hidden + border-radius + child scale transforms causes a 1px gap
-   in Chromium where the clip boundary doesn't perfectly align. Forcing GPU
-   compositing via backface-visibility eliminates this. */
+/* Promote the clipping container to its own GPU compositing layer so
+   border-radius clips are applied consistently to all children. */
 .overflow-hidden {
   -webkit-backface-visibility: hidden;
   backface-visibility: hidden;
+}
+
+/* Pre-promote images to a GPU layer before any hover interaction.
+   Tailwind v4 uses the CSS `scale` property (not transform) for scale utilities,
+   so translateZ(0) here doesn't conflict with group-hover:scale-[x] animations.
+   Without this, Chromium creates the compositing layer on first hover and the
+   border-radius clip isn't applied in time, causing a 1-frame edge flash. */
+.overflow-hidden img {
+  transform: translateZ(0);
+}
+
+/* Extend gradient/overlay divs 2px past the container edge so the GPU clip
+   covers the full rounded corner with no subpixel gap at any edge. */
+.overflow-hidden .absolute.inset-0 {
+  inset: -2px;
 }
 
 /* Smooth image fade-in helper */

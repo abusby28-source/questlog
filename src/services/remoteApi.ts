@@ -115,3 +115,16 @@ export const remoteGetMessages = (friendId: number) => get<any[]>(`/api/messages
 export const remoteSendMessage = (receiver_id: number, content?: string, game?: { game_title: string; game_artwork: string; steam_app_id?: string }) =>
   post<any>('/api/messages', { receiver_id, content, ...game });
 export const remoteMarkMessagesRead = (friendId: number) => patch(`/api/messages/${friendId}/read`);
+
+// ── Group messages ────────────────────────────────────────────────────────────
+
+export const remoteGetGroupMessages = (groupId: number) =>
+  get<any[]>(`/api/groups/${groupId}/messages`);
+
+export const remoteSendGroupMessage = (groupId: number, content: string) =>
+  post<any>(`/api/groups/${groupId}/messages`, { content });
+
+// ── Common games ──────────────────────────────────────────────────────────────
+
+export const remoteGetCommonGames = (friendId: number) =>
+  get<{ title: string; artwork?: string; status?: string }[]>(`/api/friends/${friendId}/common-games`);

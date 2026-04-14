@@ -4846,7 +4846,7 @@ async function getIgdbToken() {
     }
   });
 
-  // Lightweight install-state check — no metadata fetching, just scans disk
+  // Lightweight install-state check — no metadata fetching, just scans disk (Steam, Epic, Xbox, EA)
   app.post("/api/launcher/check-installs", authenticateToken, async (req: any, res) => {
     if (process.platform !== 'win32') return res.status(400).json({ error: "Windows only" });
     try {
@@ -4893,6 +4893,31 @@ async function getIgdbToken() {
           const appName = match?.[1];
           if (!appName) continue;
           const nowInstalled = installedAppNames.has(appName);
+          if (!!g.installed !== nowInstalled) {
+            db.prepare("UPDATE launcher_games SET installed = ? WHERE id = ?").run(nowInstalled ? 1 : 0, g.id);
+            changed.push({ id: g.id, title: g.title, installed: nowInstalled });
+          }
+        }
+      }
+
+      // ── EA: check C:\Program Files\EA Games folders ────────────────────────
+      const eaGames = db.prepare(
+        "SELECT id, title, external_id, installed FROM launcher_games WHERE user_id = ? AND platform = 'ea'"
+      ).all(req.user.id) as any[];
+
+      if (eaGames.length > 0) {
+        const eaFolders = new Set<string>();
+        try {
+          const eaPath = 'C:\\Program Files\\EA Games';
+          if (fs.existsSync(eaPath)) {
+            for (const entry of fs.readdirSync(eaPath, { withFileTypes: true })) {
+              if (entry.isDirectory()) eaFolders.add(entry.name);
+            }
+          }
+        } catch { /* EA not installed */ }
+
+        for (const g of eaGames) {
+          const nowInstalled = eaFolders.has(g.external_id);
           if (!!g.installed !== nowInstalled) {
             db.prepare("UPDATE launcher_games SET installed = ? WHERE id = ?").run(nowInstalled ? 1 : 0, g.id);
             changed.push({ id: g.id, title: g.title, installed: nowInstalled });

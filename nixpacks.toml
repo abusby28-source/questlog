@@ -1,0 +1,7 @@
+[phases.build]
+cmds = [
+  "npx esbuild server.ts --bundle --platform=node --format=esm --outfile=dist/server.js --external:express --external:better-sqlite3 --external:bcryptjs --external:jsonwebtoken --external:dotenv --external:vite"
+]
+
+[start]
+cmd = "node dist/server.js"

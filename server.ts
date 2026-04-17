@@ -836,7 +836,10 @@ async function getXboxFriendsForTitle(xboxTitleId: string | null, userId: number
 async function startServer() {
   const app = express();
   app.use(express.json());
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
+
+  // Diagnostic
+  app.get("/api/ping", (req, res) => res.json({ ok: true, ts: Date.now() }));
 
   // Auth Routes
   app.post("/api/auth/register", async (req, res) => {

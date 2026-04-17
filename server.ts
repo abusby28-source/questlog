@@ -6575,16 +6575,16 @@ async function getIgdbToken() {
     res.json({ ok: true });
   });
 
-  app.post("/api/groups/:id/leave", authenticateToken, (req, res) => {
+  app.delete("/api/groups/:groupId/member", authenticateToken, (req, res) => {
     try {
-      const group = db.prepare("SELECT * FROM groups WHERE id = ?").get(req.params.id) as any;
+      const group = db.prepare("SELECT * FROM groups WHERE id = ?").get(req.params.groupId) as any;
       if (!group) return res.status(404).json({ error: "Group not found" });
       if (group.created_by != null && Number(group.created_by) === Number(req.user.id)) {
         return res.status(400).json({ error: "Group creator cannot leave — delete the group instead" });
       }
-      const isMember = db.prepare("SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?").get(req.params.id, req.user.id);
+      const isMember = db.prepare("SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?").get(req.params.groupId, req.user.id);
       if (!isMember) return res.status(400).json({ error: "Not a member" });
-      db.prepare("DELETE FROM group_members WHERE group_id = ? AND user_id = ?").run(req.params.id, req.user.id);
+      db.prepare("DELETE FROM group_members WHERE group_id = ? AND user_id = ?").run(req.params.groupId, req.user.id);
       res.json({ ok: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message || "Failed to leave group" });

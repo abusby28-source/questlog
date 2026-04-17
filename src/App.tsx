@@ -1,4 +1,7 @@
-import React, { useState, useEffect, useRef } from'react';
+import React, { useState, useEffect, useRef, useMemo, memo } from'react';
+import CompanionsModal from './components/CompanionsModal';
+import ScheduleSessionModal from './components/ScheduleSessionModal';
+import DailyDigestModal from './components/DailyDigestModal';
 import { motion, AnimatePresence } from'motion/react';
 import { 
   Plus, Search, Trash2, ExternalLink, Gamepad2, Monitor, Tag, Info,
@@ -16,21 +19,22 @@ import {
 } from'recharts';
 import { fetchGameInfo, GameInfo, getGameSuggestions, GameSuggestion, fetchSimilarSuggestions } from'./services/geminiService';
 import {
-  remoteLogin, remoteRegister, remoteMe,
+  remoteLogin, remoteRegister, remoteMe, remoteResetPassword,
+  remoteCreateSessionInvite, remoteGetSessionInvites, remoteMarkSessionInviteRead, remoteGetUpcomingSessions,
   remoteUpdateAvatar, remoteUpdateSettings, remoteUpdateStatus,
   remoteSyncStats, remoteSyncLibrary, remoteBackupLibrary, remoteRestoreLibrary,
   remoteSearchUsers,
   remoteGetFriends, remoteGetPendingFriends, remoteAddFriend, remoteRemoveFriend,
   remoteGetFriendRecentGames, remoteGetFriendStats,
   remoteGetNotifications,
-  remoteGetGroups, remoteCreateGroup, remoteJoinGroup, remoteDeleteGroup,
+  remoteGetGroups, remoteCreateGroup, remoteJoinGroup, remoteDeleteGroup, remoteLeaveGroup,
   remoteGetSharedGames, remoteAddSharedGame, remoteUpdateSharedGame,
   remoteUpdateSharedGameStatus, remoteDeleteSharedGame,
   remoteDismissPriceAlert, remoteDismissGamePassAlert,
   remoteGetGroupOwnership,
   remoteGetComments, remoteAddComment, remoteDeleteComment,
   remoteGetMessages, remoteSendMessage, remoteMarkMessagesRead,
-  remoteGetGroupMessages, remoteSendGroupMessage, remoteGetCommonGames,
+  remoteGetGroupMessages, remoteSendGroupMessage, remoteGetCommonGames, remoteGetLibraryActivity,
 } from './services/remoteApi';
 import { Game } from'./types';
 import { clsx, type ClassValue } from'clsx';
@@ -114,7 +118,7 @@ const DiscordIcon = ({ className }: { className?: string }) => (
 );
 
 // Resolves proxy URL to direct CDN URL after first load so tab revisits are flash-free
-function CachedImg({ proxyUrl, className, alt, onError }: { proxyUrl: string; className?: string; alt?: string; onError?: React.ReactEventHandler<HTMLImageElement> }) {
+const CachedImg = memo(function CachedImg({ proxyUrl, className, alt, onError }: { proxyUrl: string; className?: string; alt?: string; onError?: React.ReactEventHandler<HTMLImageElement> }) {
   const [src, setSrc] = React.useState(() => resolvedImgCache.get(proxyUrl) || proxyUrl);
   // Sync src when proxyUrl changes (e.g. artwork refresh)
   useEffect(() => {
@@ -128,9 +132,9 @@ function CachedImg({ proxyUrl, className, alt, onError }: { proxyUrl: string; cl
     }
   };
   return <img src={src} alt={alt} className={className} referrerPolicy="no-referrer" onLoad={handleLoad} onError={onError} />;
-}
+});
 
-function ExternalGameCard({ game, onClick, loading }: { game: DiscoverGame; onClick: () => void; loading?: boolean }) {
+const ExternalGameCard = memo(function ExternalGameCard({ game, onClick, loading }: { game: DiscoverGame; onClick: () => void; loading?: boolean }) {
   // Always use the SGDB horizontal proxy endpoints for correct aspect-ratio artwork
   const steamAppID = (game as any).steamAppID;
   const proxyUrl = steamAppID
@@ -172,9 +176,9 @@ function ExternalGameCard({ game, onClick, loading }: { game: DiscoverGame; onCl
       </div>
     </motion.div>
   );
-}
+});
 
-function EpicHeroBanner({ games, onDetails, onOpenInBrowser }: { games: any[]; onDetails: (g: any) => void; onOpenInBrowser: (url: string) => void }) {
+const EpicHeroBanner = memo(function EpicHeroBanner({ games, onDetails, onOpenInBrowser }: { games: any[]; onDetails: (g: any) => void; onOpenInBrowser: (url: string) => void }) {
   const [idx, setIdx] = React.useState(0);
   React.useEffect(() => {
     if (games.length <= 1) return;
@@ -234,7 +238,7 @@ function EpicHeroBanner({ games, onDetails, onOpenInBrowser }: { games: any[]; o
       )}
     </div>
   );
-}
+});
 
 function getCountdown(releaseDateStr: string | undefined | null): { days: number; hours: number; minutes: number; isImminent: boolean } | null {
   if (!releaseDateStr || releaseDateStr === 'Unknown') return null;
@@ -267,7 +271,7 @@ function getVagueUpcoming(releaseDateStr: string | undefined | null): string | n
   return null;
 }
 
-const HorizontalScrollRow = ({ children, title, icon }: { children: React.ReactNode; title: string; icon: React.ReactNode }) => {
+const HorizontalScrollRow = memo(({ children, title, icon }: { children: React.ReactNode; title: string; icon: React.ReactNode }) => {
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
   const scroll = (direction:'left' |'right') => {
     if (scrollRef.current) {
@@ -282,7 +286,7 @@ const HorizontalScrollRow = ({ children, title, icon }: { children: React.ReactN
   return (
     <section className="relative group/row">
       <div className="flex items-center justify-between mb-8">
-        <h2 className="text-2xl font-bold tracking-tight flex items-center gap-3">
+        <h2 className="text-xs font-bold uppercase tracking-widest text-white/50 flex items-center gap-2.5">
           {icon}
           {title}
         </h2>
@@ -313,7 +317,7 @@ const HorizontalScrollRow = ({ children, title, icon }: { children: React.ReactN
       </div>
     </section>
   );
-};
+});
 
 interface User {
   id: number;
@@ -393,6 +397,7 @@ interface HomeData {
     tagStats: { tag: string, count: number }[];
   };
   friendsActivity?: DiscoverGame[];
+  sharedLogActivity?: { id: number; title: string; artwork?: string; genre?: string; added_by: string; user_avatar?: string; group_name: string; created_at: string }[];
 }
 
 interface DiscoverGame {
@@ -491,7 +496,7 @@ const friendStatusLabel: Record<string, string> = {
   offline:'Offline',
 };
 
-const PlatformBadge = ({ platform }: { platform?: string }) => {
+const PlatformBadge = memo(({ platform }: { platform?: string }) => {
   if (!platform) return null;
   if (platform === 'steam') return (
     <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide bg-[#1b2838] text-[#c7d5e0] border border-[#c7d5e0]/20 shrink-0">
@@ -517,9 +522,9 @@ const PlatformBadge = ({ platform }: { platform?: string }) => {
     </span>
   );
   return null;
-};
+});
 
-const FriendRow = ({ friend, showStatus = true, lastPlayedAt, platform }: { friend: FriendEntry; showStatus?: boolean; lastPlayedAt?: string; platform?: string }) => {
+const FriendRow = memo(({ friend, showStatus = true, lastPlayedAt, platform }: { friend: FriendEntry; showStatus?: boolean; lastPlayedAt?: string; platform?: string }) => {
   const status = friend.online_status ||'offline';
   const dotClass = friendStatusDot[status] ??'bg-white/20';
   const statusLabel = friendStatusLabel[status] ?? status;
@@ -550,7 +555,33 @@ const FriendRow = ({ friend, showStatus = true, lastPlayedAt, platform }: { frie
       </div>
     </div>
   );
-};
+});
+
+// Reusable member avatar — shows initials on broken/missing image
+const AVATAR_COLORS = ['#7c3aed','#2563eb','#059669','#d97706','#dc2626','#db2777','#0891b2','#9333ea'];
+function avatarColor(username: string) { return AVATAR_COLORS[username.charCodeAt(0) % AVATAR_COLORS.length]; }
+
+const MemberAvatar = React.memo(function MemberAvatar({ username, avatar, size = 'md', owns, onClick, className }: {
+  username: string; avatar?: string | null; size?: 'xs' | 'sm' | 'md' | 'lg'; owns?: boolean; onClick?: (e: React.MouseEvent) => void; className?: string;
+}) {
+  const [failed, setFailed] = React.useState(false);
+  const dim = { xs: 'w-5 h-5 text-[9px]', sm: 'w-6 h-6 text-[10px]', md: 'w-8 h-8 text-xs', lg: 'w-10 h-10 text-sm' }[size];
+  const border = owns === true ? 'border-2 border-emerald-400' : owns === false ? 'border-2 border-white/20' : 'border-2 border-[#141414]';
+  const muted = owns === false ? 'grayscale opacity-50' : '';
+  return (
+    <div
+      onClick={onClick}
+      title={username}
+      className={cn('rounded-full flex items-center justify-center font-bold overflow-hidden shrink-0', dim, border, muted, onClick && 'cursor-pointer hover:scale-110 active:scale-95 transition-transform', className)}
+      style={failed || !avatar ? { backgroundColor: avatarColor(username) } : undefined}
+    >
+      {!failed && avatar
+        ? <img src={avatar} alt={username} className="w-full h-full object-cover" onError={() => setFailed(true)} />
+        : <span className="text-white leading-none select-none">{(username[0] || '?').toUpperCase()}</span>
+      }
+    </div>
+  );
+});
 
 const TagDropdown = ({
   availableTags,
@@ -633,7 +664,7 @@ const TagDropdown = ({
   );
 };
 
-const SuggestionThumb: React.FC<{ steamAppID?: string; title: string; fallbackThumb?: string; size?: string }> = ({ steamAppID, title, fallbackThumb, size = 'w-10 h-10' }) => {
+const SuggestionThumb: React.FC<{ steamAppID?: string; title: string; fallbackThumb?: string; size?: string }> = memo(({ steamAppID, title, fallbackThumb, size = 'w-10 h-10' }) => {
   const [iconUrl, setIconUrl] = React.useState<string | null>(null);
   const [done, setDone] = React.useState(false);
 
@@ -657,7 +688,7 @@ const SuggestionThumb: React.FC<{ steamAppID?: string; title: string; fallbackTh
       onError={e => { if (fallbackThumb && (e.target as HTMLImageElement).src !== fallbackThumb) (e.target as HTMLImageElement).src = fallbackThumb; }}
     />
   );
-};
+});
 
 function buildTagline(
   tags: { tag: string; count: number }[],
@@ -960,10 +991,25 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [groups, setGroups] = useState<Group[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<number | null>(null);
-  const [authMode, setAuthMode] = useState<'login' |'register'>('login');
+  const [sessionInvites, setSessionInvites] = useState<any[]>([]);
+  const [upcomingSessions, setUpcomingSessions] = useState<any[]>([]);
+  const [nowTick, setNowTick] = useState(Date.now());
+  const [sessionModal, setSessionModal] = useState<{ game: Game; groupId: number } | null>(null);
+  const [sessionDateTime, setSessionDateTime] = useState('');
+  const [sessionMessage, setSessionMessage] = useState('');
+  const [sessionSending, setSessionSending] = useState(false);
+  const [showDailyDigest, setShowDailyDigest] = useState(false);
+  const [digestLastSeen, setDigestLastSeen] = useState<string | null>(null);
+  const [digestLibraryActivity, setDigestLibraryActivity] = useState<{id: number; username: string; game_title: string; group_name: string; created_at: string}[]>([]);
+  const dailyDigestShown = useRef(false);
+
+  const [authMode, setAuthMode] = useState<'login' | 'register' | 'reset'>('login');
   const [authUsername, setAuthUsername] = useState('');
   const [authPassword, setAuthPassword] = useState('');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authNewPassword, setAuthNewPassword] = useState('');
   const [authError, setAuthError] = useState('');
+  const [authSuccess, setAuthSuccess] = useState('');
 
   const [games, setGames] = useState<Game[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -1023,11 +1069,13 @@ export default function App() {
   const [appFriends, setAppFriends] = useState<{id: number; username: string; avatar?: string; online_status?: string; current_game?: string}[]>([]);
   const [friendSearch, setFriendSearch] = useState('');
   const [friendSearchResults, setFriendSearchResults] = useState<{id: number; username: string; avatar?: string}[]>([]);
+  const [sentFriendRequests, setSentFriendRequests] = useState<Set<number>>(new Set());
   const [friendActivity, setFriendActivity] = useState<Record<number, any[]>>({});
   const [expandedFriend, setExpandedFriend] = useState<number | null>(null);
   const [showAvatarEdit, setShowAvatarEdit] = useState(false);
   const [avatarInput, setAvatarInput] = useState('');
   const [gameComments, setGameComments] = useState<{id: number; content: string; created_at: string; username: string; avatar?: string; user_id: number}[]>([]);
+  const [whoHasThisOpen, setWhoHasThisOpen] = useState(false);
   const [commentInput, setCommentInput] = useState('');
   const [groupOwnership, setGroupOwnership] = useState<{ members: {id: number; username: string; avatar?: string}[]; ownership: Record<number, number[]> } | null>(null);
   const [hideLibraryGames, setHideLibraryGames] = useState(false);
@@ -1540,19 +1588,45 @@ export default function App() {
     });
   }, [showStatsDetail, appFriends.length, token]); // eslint-disable-line
 
-  // Poll notification count every 30s
+  // Poll notification count every 30s; fetch session invites + upcoming on login
   useEffect(() => {
     if (!token) return;
     fetchNotificationCount();
     fetchPendingRequests();
+    fetchSessionInvites();
+    fetchUpcomingSessions();
     const iv = setInterval(fetchNotificationCount, 30000);
     return () => clearInterval(iv);
   }, [token]); // eslint-disable-line
 
+  // 1-second tick for live countdown
   useEffect(() => {
-    if (activeList === 'shared' && activeGroupId) fetchGroupOwnership(activeGroupId);
+    const iv = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // Show daily digest on every login when home data loads
+  useEffect(() => {
+    if (!homeData || dailyDigestShown.current) return;
+    const lastSeen = localStorage.getItem('questlog_last_seen');
+    setDigestLastSeen(lastSeen);
+    localStorage.setItem('questlog_last_seen', new Date().toDateString());
+    dailyDigestShown.current = true;
+    remoteGetLibraryActivity().then(setDigestLibraryActivity).catch(() => {});
+    setShowDailyDigest(true);
+  }, [homeData]); // eslint-disable-line
+
+  useEffect(() => {
+    if (activeList === 'shared' && activeGroupId) fetchGroupOwnership(activeGroupId, true);
     else setGroupOwnership(null);
   }, [activeList, activeGroupId, games.length]); // re-check when games finish loading
+
+  // Poll group ownership every 30s so new members joining causes illumination to update correctly
+  useEffect(() => {
+    if (activeList !== 'shared' || !activeGroupId) return;
+    const iv = setInterval(() => fetchGroupOwnership(activeGroupId), 30000);
+    return () => clearInterval(iv);
+  }, [activeList, activeGroupId]);
 
 // Friends online polls every 30s; home tiles only load once per session (stable until app restart)
   useEffect(() => {
@@ -1677,11 +1751,12 @@ export default function App() {
     } catch (e) {}
   };
 
-  const addFriend = async (username: string) => {
+  const addFriend = async (username: string, userId?: number) => {
     if (!token) return;
     try {
       await remoteAddFriend(username);
-      setFriendSearch(''); setFriendSearchResults([]); fetchAppFriends();
+      if (userId !== undefined) setSentFriendRequests(prev => new Set(prev).add(userId));
+      fetchAppFriends();
     } catch (e: any) {
       alert(e.message || 'Failed to add friend');
     }
@@ -1726,6 +1801,71 @@ export default function App() {
     } catch {}
   };
 
+  const fetchSessionInvites = async () => {
+    if (!token) return;
+    try {
+      setSessionInvites(await remoteGetSessionInvites());
+    } catch {}
+  };
+
+  const fetchUpcomingSessions = async () => {
+    if (!token) return;
+    try {
+      setUpcomingSessions(await remoteGetUpcomingSessions());
+    } catch {}
+  };
+
+  const addToCalendar = (invite: any) => {
+    const start = new Date(invite.scheduled_at);
+    const end = new Date(start.getTime() + 60 * 60 * 1000);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const fmt = (d: Date) => `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}00`;
+    const lines = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//QuestLog//EN',
+      'BEGIN:VEVENT',
+      `UID:questlog-session-${invite.id}@questlog`,
+      `DTSTART:${fmt(start)}`,
+      `DTEND:${fmt(end)}`,
+      `SUMMARY:Play ${invite.game_title} – QuestLog Session`,
+      invite.message ? `DESCRIPTION:${invite.message}` : null,
+      'END:VEVENT', 'END:VCALENDAR',
+    ].filter(Boolean).join('\r\n');
+    const blob = new Blob([lines], { type: 'text/calendar;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `play-${invite.game_title.replace(/[^a-z0-9]/gi, '-').toLowerCase()}.ics`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const dismissSessionInvite = async (id: number) => {
+    try {
+      await remoteMarkSessionInviteRead(id);
+      setSessionInvites(prev => prev.filter(i => i.id !== id));
+      fetchNotificationCount();
+    } catch {}
+  };
+
+  const handleSendSessionInvite = async () => {
+    if (!sessionModal || !sessionDateTime) return;
+    setSessionSending(true);
+    try {
+      await remoteCreateSessionInvite(sessionModal.groupId, sessionModal.game.id, sessionModal.game.title, sessionDateTime, sessionMessage || undefined);
+      // Also post a special message to the group chat so members can see it there
+      const payload = JSON.stringify({ game_title: sessionModal.game.title, scheduled_at: sessionDateTime, message: sessionMessage || null });
+      await remoteSendGroupMessage(sessionModal.groupId, `[SESSION_INVITE]${payload}`);
+      setSessionModal(null);
+      setSessionDateTime('');
+      setSessionMessage('');
+      fetchUpcomingSessions();
+    } catch (err: any) {
+      alert(err.message || 'Failed to send session invite');
+    } finally {
+      setSessionSending(false);
+    }
+  };
+
   const openConversation = async (friend: {id: number; username: string; avatar?: string}) => {
     setSelectedConvoFriend(friend);
     setFriendsModalTab('messages');
@@ -1752,6 +1892,7 @@ export default function App() {
     setFriendsModalTab('messages');
     try {
       setGroupMessages(await remoteGetGroupMessages(group.id));
+      fetchNotificationCount();
     } catch {}
   };
 
@@ -1820,8 +1961,18 @@ export default function App() {
     } catch (e) {}
   };
 
-  const fetchGroupOwnership = async (groupId: number) => {
+  const openMemberProfile = (member: {id: number; username: string; avatar?: string | null}) => {
+    fetchAppFriends();
+    fetchPendingRequests();
+    fetchNotificationCount();
+    fetchFriendActivity(member.id);
+    setFriendsModalTab('friends');
+    setShowQuestlogFriends(true);
+  };
+
+  const fetchGroupOwnership = async (groupId: number, clearFirst = false) => {
     if (!token) return;
+    if (clearFirst) setGroupOwnership(null);
     try {
       setGroupOwnership(await remoteGetGroupOwnership(groupId));
     } catch (e) {}
@@ -2507,12 +2658,29 @@ export default function App() {
     }
   };
 
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthSuccess('');
+    try {
+      await remoteResetPassword(authUsername, authEmail, authNewPassword);
+      setAuthSuccess('Password reset successfully! You can now log in.');
+      setAuthMode('login');
+      setAuthUsername('');
+      setAuthEmail('');
+      setAuthNewPassword('');
+    } catch (err: any) {
+      setAuthError(err.message || 'Reset failed');
+    }
+  };
+
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
+    setAuthSuccess('');
     try {
       const data = authMode === 'register'
-        ? await remoteRegister(authUsername, authPassword)
+        ? await remoteRegister(authUsername, authPassword, authEmail)
         : await remoteLogin(authUsername, authPassword);
       // Clear previous account's state before loading new account
       setGames([]);
@@ -2524,6 +2692,8 @@ export default function App() {
       setSuggestedForYou(null);
       setSteamId('');
       localStorage.removeItem('steamId');
+      setGroupOwnership(null);
+      setActiveGroupId(null);
       setToken(data.token);
       localStorage.setItem('token', data.token);
       setUser(data.user);
@@ -2543,6 +2713,15 @@ export default function App() {
     setDiscoverData(null);
     setSuggestedForYou(null);
     setSteamId('');
+    setSessionInvites([]);
+    setUpcomingSessions([]);
+    setSessionModal(null);
+    setGroupOwnership(null);
+    setActiveGroupId(null);
+    setShowDailyDigest(false);
+    setDigestLastSeen(null);
+    setDigestLibraryActivity([]);
+    dailyDigestShown.current = false;
     localStorage.removeItem('token');
     localStorage.removeItem('steamId');
   };
@@ -2714,10 +2893,7 @@ export default function App() {
   };
 
   const openXboxApp = (title: string) => {
-    window.open(`xbox://search/?query=${encodeURIComponent(title)}`);
-    setTimeout(() => {
-      window.open(`https://www.xbox.com/en-US/search?q=${encodeURIComponent(title)}`,'_blank');
-    }, 500);
+    openInBrowser(`xbox://search/?query=${encodeURIComponent(title)}`);
   };
 
 // Open a URL in the system default browser (not inside the Electron window)
@@ -2763,6 +2939,17 @@ export default function App() {
       fetchGroups();
     } catch (e: any) {
       alert(e.message || 'Failed to delete group');
+    }
+  };
+
+  const handleLeaveGroup = async (groupId: number, groupName: string) => {
+    if (!window.confirm(`Leave group "${groupName}"?`)) return;
+    try {
+      await remoteLeaveGroup(groupId);
+      if (activeGroupId === groupId) setActiveGroupId(null);
+      fetchGroups();
+    } catch (e: any) {
+      alert(e.message || 'Failed to leave group');
     }
   };
 
@@ -3315,86 +3502,31 @@ export default function App() {
     }
   };
 
-  if (!token) {
-    return (
-      <div className="min-h-screen bg-[#0a0a0a] text-[#E4E3E0] flex items-center justify-center p-6">
-        <div className="w-full max-w-md bg-[#1a1a1a] p-8 rounded-3xl shadow-xl border border-white/10">
-          <div className="flex items-center justify-center gap-3 mb-8">
-            <div className="w-12 h-12 bg-emerald-600 rounded-full flex items-center justify-center text-[#141414] shadow-lg">
-              <Gamepad2 size={28}/>
-            </div>
-            <h1 className="text-3xl font-bold tracking-tighter uppercase italic font-serif text-white">
-              QuestLog
-            </h1>
-          </div>
-          
-          <form onSubmit={handleAuth} className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-widest mb-2">Username</label>
-              <input
-                type="text"
-                value={authUsername}
-                onChange={(e) => setAuthUsername(e.target.value)}
-                className="w-full bg-[#0a0a0a] text-white border-2 border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-[#E4E3E0] transition-colors"
-                required
-/>
-            </div>
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-widest mb-2">Password</label>
-              <input
-                type="password"
-                value={authPassword}
-                onChange={(e) => setAuthPassword(e.target.value)}
-                className="w-full bg-[#0a0a0a] text-white border-2 border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-[#E4E3E0] transition-colors"
-                required
-/>
-            </div>
-            
-            {authError && <p className="text-red-400 text-sm font-bold">{authError}</p>}
-            
-            <button
-              type="submit"
-              className="w-full bg-white text-[#141414] font-bold uppercase tracking-widest py-4 rounded-xl hover:bg-white/90 transition-colors cursor-pointer"
->
-              {authMode ==='login' ?'Login' :'Create Account'}
-            </button>
-          </form>
-          
-          <div className="mt-6 text-center">
-            <button
-              onClick={() => setAuthMode(authMode ==='login' ?'register' :'login')}
-              className="text-sm font-bold text-white/50 hover:text-white transition-colors"
->
-              {authMode ==='login' ?'Need an account? Register' :'Already have an account? Login'}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  const availableTags = Array.from(new Set(
-    (activeList ==='private' 
+  const availableTags = useMemo(() => Array.from(new Set(
+    (activeList ==='private'
       ? games.filter(g => g.list_type ==='private')
       : games.filter(g => g.list_type ==='shared' && g.group_id === activeGroupId))
       .flatMap(g => g.tags ? g.tags.split(',').map(t => t.trim()) : [])
-  )).sort();
+  )).sort(), [games, activeList, activeGroupId]);
 
   // Map backlog game id → matching LauncherGame (by Steam App ID or normalized title)
-  const libraryMatchMap = new Map<number, typeof launcherGames[0]>();
-  for (const g of games) {
-    const steamAppIdMatch = g.steam_url?.match(/\/app\/(\d+)/);
-    const gSteamId = steamAppIdMatch ? steamAppIdMatch[1] : null;
-    const gNorm = g.title.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const match = launcherGames.find(lg => {
-      if (gSteamId && lg.external_id && String(lg.external_id) === gSteamId) return true;
-      const lgNorm = lg.title.toLowerCase().replace(/[^a-z0-9]/g, '');
-      return lgNorm === gNorm;
-    });
-    if (match) libraryMatchMap.set(g.id, match);
-  }
+  const libraryMatchMap = useMemo(() => {
+    const map = new Map<number, typeof launcherGames[0]>();
+    for (const g of games) {
+      const steamAppIdMatch = g.steam_url?.match(/\/app\/(\d+)/);
+      const gSteamId = steamAppIdMatch ? steamAppIdMatch[1] : null;
+      const gNorm = g.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const match = launcherGames.find(lg => {
+        if (gSteamId && lg.external_id && String(lg.external_id) === gSteamId) return true;
+        const lgNorm = lg.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+        return lgNorm === gNorm;
+      });
+      if (match) map.set(g.id, match);
+    }
+    return map;
+  }, [games, launcherGames]);
 
-  const displayedGames = (activeList ==='private'
+  const displayedGames = useMemo(() => (activeList ==='private'
     ? games.filter(g => g.list_type ==='private')
     : games.filter(g => g.list_type ==='shared' && g.group_id === activeGroupId))
     .filter(g => {
@@ -3422,13 +3554,12 @@ export default function App() {
         : (() => { const owners = groupOwnership?.ownership?.[b.id] ?? []; const members = groupOwnership?.members ?? []; return members.length > 0 && owners.length === members.length; })();
       const aUnreleased = !!(getCountdown(a.release_date) || getVagueUpcoming(a.release_date));
       const bUnreleased = !!(getCountdown(b.release_date) || getVagueUpcoming(b.release_date));
-      // illuminated first, unreleased last, rest in original order
       if (aIlluminated !== bIlluminated) return aIlluminated ? -1 : 1;
       if (aUnreleased !== bUnreleased) return aUnreleased ? 1 : -1;
       return 0;
-    });
+    }), [games, activeList, activeGroupId, hideLibraryGames, hideUnreleasedPrivate, hideUnreleasedShared, selectedTags, questLogSearch, libraryMatchMap, groupOwnership]);
 
-  const filteredLauncherGames = launcherGames.filter(g => {
+  const filteredLauncherGames = useMemo(() => launcherGames.filter(g => {
     if (showHiddenGames) { if (!g.hidden) return false; } else { if (g.hidden) return false; }
     if (launcherSearch) {
       const q = launcherSearch.toLowerCase();
@@ -3448,7 +3579,147 @@ export default function App() {
       if (!launcherSelectedTags.every(tag => gameTags.includes(tag.toLowerCase()))) return false;
     }
     return true;
-  });
+  }), [launcherGames, showHiddenGames, launcherSearch, launcherInstalledFilter, launcherPlatformFilter, launcherSelectedTags]);
+
+  if (!token) {
+    return (
+      <div className="min-h-screen bg-[#0a0a0a] text-[#E4E3E0] flex items-center justify-center p-6">
+        <div className="w-full max-w-md bg-[#1a1a1a] p-8 rounded-3xl shadow-xl border border-white/10">
+          <div className="flex items-center justify-center gap-3 mb-8">
+            <div className="w-12 h-12 bg-emerald-600 rounded-full flex items-center justify-center text-[#141414] shadow-lg">
+              <Gamepad2 size={28}/>
+            </div>
+            <h1 className="text-3xl font-bold tracking-tighter uppercase italic font-serif text-white">
+              QuestLog
+            </h1>
+          </div>
+          
+          {authMode === 'reset' ? (
+            <form onSubmit={handleResetPassword} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-widest mb-2">Username</label>
+                <input
+                  type="text"
+                  value={authUsername}
+                  onChange={(e) => setAuthUsername(e.target.value)}
+                  className="w-full bg-[#0a0a0a] text-white border-2 border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-[#E4E3E0] transition-colors"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-widest mb-2">Email Address</label>
+                <input
+                  type="email"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  className="w-full bg-[#0a0a0a] text-white border-2 border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-[#E4E3E0] transition-colors"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-widest mb-2">New Password</label>
+                <input
+                  type="password"
+                  value={authNewPassword}
+                  onChange={(e) => setAuthNewPassword(e.target.value)}
+                  className="w-full bg-[#0a0a0a] text-white border-2 border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-[#E4E3E0] transition-colors"
+                  required
+                  minLength={6}
+                />
+              </div>
+
+              {authError && <p className="text-red-400 text-sm font-bold">{authError}</p>}
+              {authSuccess && <p className="text-emerald-400 text-sm font-bold">{authSuccess}</p>}
+
+              <button
+                type="submit"
+                className="w-full bg-white text-[#141414] font-bold uppercase tracking-widest py-4 rounded-xl hover:bg-white/90 transition-colors cursor-pointer"
+              >
+                Reset Password
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleAuth} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-widest mb-2">Username</label>
+                <input
+                  type="text"
+                  value={authUsername}
+                  onChange={(e) => setAuthUsername(e.target.value)}
+                  className="w-full bg-[#0a0a0a] text-white border-2 border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-[#E4E3E0] transition-colors"
+                  required
+                />
+              </div>
+              {authMode === 'register' && (
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-widest mb-2">Email Address</label>
+                  <input
+                    type="email"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    className="w-full bg-[#0a0a0a] text-white border-2 border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-[#E4E3E0] transition-colors"
+                    required
+                  />
+                </div>
+              )}
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-widest mb-2">Password</label>
+                <input
+                  type="password"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  className="w-full bg-[#0a0a0a] text-white border-2 border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-[#E4E3E0] transition-colors"
+                  required
+                />
+              </div>
+
+              {authError && <p className="text-red-400 text-sm font-bold">{authError}</p>}
+              {authSuccess && <p className="text-emerald-400 text-sm font-bold">{authSuccess}</p>}
+
+              <button
+                type="submit"
+                className="w-full bg-white text-[#141414] font-bold uppercase tracking-widest py-4 rounded-xl hover:bg-white/90 transition-colors cursor-pointer"
+              >
+                {authMode === 'login' ? 'Login' : 'Create Account'}
+              </button>
+            </form>
+          )}
+
+          <div className="mt-6 text-center space-y-2">
+            {authMode === 'reset' ? (
+              <button
+                onClick={() => { setAuthMode('login'); setAuthError(''); setAuthSuccess(''); }}
+                className="text-sm font-bold text-white/50 hover:text-white transition-colors"
+              >
+                Back to Login
+              </button>
+            ) : (
+              <>
+                <div>
+                  <button
+                    onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthError(''); setAuthSuccess(''); setAuthEmail(''); }}
+                    className="text-sm font-bold text-white/50 hover:text-white transition-colors"
+                  >
+                    {authMode === 'login' ? 'Need an account? Register' : 'Already have an account? Login'}
+                  </button>
+                </div>
+                {authMode === 'login' && (
+                  <div>
+                    <button
+                      onClick={() => { setAuthMode('reset'); setAuthError(''); setAuthSuccess(''); }}
+                      className="text-sm font-bold text-white/30 hover:text-white/60 transition-colors"
+                    >
+                      Forgot your password?
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Map of normalized title -> Epic store URL for currently free Epic games
   const epicFreeMap = new Map<string, string>();
@@ -3459,10 +3730,12 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-[#E4E3E0] font-sans selection:bg-[#1a1a1a] selection:text-[#E4E3E0]">
       <header
-        className="border-b border-[#E4E3E0] sticky top-0 bg-[#0a0a0a]/90 z-40"
+        className="sticky top-0 bg-[#0a0a0a]/90 z-40"
         style={{ WebkitAppRegion:'drag' } as React.CSSProperties}
 >
-        <div className="max-w-7xl mx-auto px-6 pr-40 h-20 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-6 pr-40 h-16 flex items-center justify-between">
+        {/* Bottom fade */}
+        <div className="absolute top-full left-0 right-0 h-8 bg-gradient-to-b from-[#0a0a0a] to-transparent pointer-events-none z-40"/>
           <div
             className="flex items-center gap-8"
             style={{ WebkitAppRegion:'no-drag' } as React.CSSProperties}
@@ -3518,19 +3791,44 @@ export default function App() {
             className="flex items-center gap-3"
             style={{ WebkitAppRegion:'no-drag' } as React.CSSProperties}
 >
+            {/* Play Together countdown pill */}
+            {(() => {
+              const next = upcomingSessions
+                .filter(s => new Date(s.scheduled_at).getTime() > nowTick)
+                .sort((a, b) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime())[0];
+              if (!next) return null;
+              const diff = new Date(next.scheduled_at).getTime() - nowTick;
+              const totalHours = Math.floor(diff / 3600000);
+              const days = Math.floor(totalHours / 24);
+              const hours = totalHours % 24;
+              const mins = Math.floor((diff % 3600000) / 60000);
+              const secs = Math.floor((diff % 60000) / 1000);
+              const timeStr = days > 0
+                ? `${days}d ${String(hours).padStart(2,'0')}h ${String(mins).padStart(2,'0')}m`
+                : `${String(totalHours).padStart(2,'0')}:${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
+              return (
+                <div className="flex items-center gap-1.5 bg-emerald-600/15 border border-emerald-500/25 rounded-full pl-2.5 pr-3 py-1.5 max-w-[200px]" title={`Play Together: ${next.game_title}`}>
+                  <Calendar size={10} className="text-emerald-400 shrink-0"/>
+                  <span className="text-[10px] font-bold text-emerald-300 truncate">{next.game_title}</span>
+                  <span className="text-[10px] font-mono tabular-nums text-emerald-400 shrink-0">{timeStr}</span>
+                </div>
+              );
+            })()}
             {/* Unified avatar button — opens social + settings panel */}
             <button
               onClick={() => { fetchAppFriends(); fetchPendingRequests(); fetchNotificationCount(); setShowQuestlogFriends(true); }}
-              className="relative group w-9 h-9 rounded-full overflow-hidden border border-white/10 hover:border-white/40 transition-all focus:outline-none"
+              className="relative group w-9 h-9 rounded-full focus:outline-none"
               title="Profile, Friends & Settings"
             >
-              <img
-                src={user?.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user?.username}`}
-                alt="avatar"
-                className="w-full h-full object-cover"
-              />
-              <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                <Users size={12} className="text-white"/>
+              <div className="w-9 h-9 rounded-full overflow-hidden border border-white/10 group-hover:border-white/40 transition-all">
+                <img
+                  src={user?.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user?.username}`}
+                  alt="avatar"
+                  className="w-full h-full object-cover"
+                />
+                <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                  <Users size={12} className="text-white"/>
+                </div>
               </div>
               {notificationCount > 0 && (
                 <span className="absolute -top-1 -right-1 min-w-[16px] h-4 bg-emerald-500 text-white text-[9px] font-black rounded-full flex items-center justify-center px-1 leading-none pointer-events-none">
@@ -3604,9 +3902,9 @@ export default function App() {
             </section>
 
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 items-start">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
               <div className="lg:col-span-8 space-y-10">
-                <HorizontalScrollRow title="Jump Back In" icon={<Clock size={24} className="text-emerald-500"/>}>
+                <HorizontalScrollRow title="Jump Back In" icon={<Clock size={12} className="text-emerald-500/60"/>}>
                   {homeData?.recentlyPlayed?.map((game) => (
                     <motion.div key={game.id} whileHover={{ y: -5 }} onClick={() => { setSelectedGame(game as any); fetchLauncherGameDetails(game.id); }}
                       className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
@@ -3633,7 +3931,7 @@ export default function App() {
                   ))}
                 </HorizontalScrollRow>
 
-                <HorizontalScrollRow title="Suggested from Library" icon={<Library size={24} className="text-blue-500"/>}>
+                <HorizontalScrollRow title="Suggested from Library" icon={<Library size={12} className="text-blue-500/60"/>}>
                   {homeData?.suggestedLibrary?.map((game) => (
                     <motion.div key={game.id} whileHover={{ y: -5 }} onClick={() => { setSelectedGame(game as any); fetchLauncherGameDetails(game.id); }}
                       className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
@@ -3660,7 +3958,7 @@ export default function App() {
                   ))}
                 </HorizontalScrollRow>
 
-                <HorizontalScrollRow title="Suggested from Log" icon={<Gamepad2 size={24} className="text-purple-500"/>}>
+                <HorizontalScrollRow title="Suggested from Log" icon={<Gamepad2 size={12} className="text-purple-500/60"/>}>
                   {homeData?.suggestedLog?.map((game) => (
                     <motion.div key={game.id} whileHover={{ y: -5 }} onClick={() => { setSelectedGame(game as any); fetchQuestlogFriends(game as any); }}
                       className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
@@ -3689,7 +3987,7 @@ export default function App() {
 
                 {/* Friends Activity */}
                 {homeData?.friendsActivity && homeData.friendsActivity.length > 0 && (
-                  <HorizontalScrollRow title="Friends Activity" icon={<Users size={24} className="text-blue-400"/>}>
+                  <HorizontalScrollRow title="Friends Activity" icon={<Users size={12} className="text-blue-400/60"/>}>
                     {homeData.friendsActivity.map((game) => (
                       <ExternalGameCard key={game.id} game={game} onClick={() => handleFriendActivityClick(game)} />
                     ))}
@@ -3698,7 +3996,7 @@ export default function App() {
 
               </div>
 
-              <div className="lg:col-span-4 space-y-6 sticky top-24">
+              <div className="lg:col-span-4 flex flex-col gap-6 sticky top-24 self-stretch">
                 <section className="bg-white/5 rounded-[32px] p-8 border border-white/10 max-h-[60vh] overflow-y-auto custom-scrollbar">
                   <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
                     <Users size={20} className="text-blue-500"/>
@@ -3847,7 +4145,7 @@ export default function App() {
                   </div>
                 </section>
 
-                <section className="bg-white/5 rounded-[32px] p-8 border border-white/10">
+                <section className="mt-auto bg-white/5 rounded-[32px] p-8 border border-white/10">
                   <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
                     <LinkIcon size={20} className="text-orange-500"/>
                     Connected Accounts
@@ -3880,6 +4178,15 @@ export default function App() {
                       </div>
                       {user?.discord_id ? <CheckCircle2 size={16} className="text-emerald-500"/> : <Plus size={16} className="text-white/20"/>}
                     </div>
+                    <div className={`flex items-center justify-between p-4 rounded-2xl bg-black/20 border border-white/5 transition-colors ${!user?.epic_account_id ?'cursor-pointer hover:bg-white/5' :''}`} onClick={() => !user?.epic_account_id && handleSyncEpic()}>
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-[#0078f2] flex items-center justify-center">
+                          <EpicIcon className="w-5 h-5 text-white"/>
+                        </div>
+                        <span className="text-xs font-bold">Epic Games</span>
+                      </div>
+                      {user?.epic_account_id ? <CheckCircle2 size={16} className="text-emerald-500"/> : <Plus size={16} className="text-white/20"/>}
+                    </div>
                   </div>
                 </section>
 
@@ -3895,8 +4202,9 @@ export default function App() {
                   <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 16 }} transition={{ duration: 0.15 }}
                     className="relative w-full max-w-4xl bg-[#1a1a1a] rounded-[40px] border border-white/10 overflow-hidden flex flex-col max-h-[90vh]"
 >
+                    <div className="absolute inset-0 pointer-events-none z-10" style={{ boxShadow: 'inset 0 0 50px rgba(0,0,0,0.5)', borderRadius: 'inherit' }}/>
                     <div className="p-8 border-b border-white/5 flex items-center justify-between">
-                      <h2 className="text-3xl font-black uppercase tracking-tighter">
+                      <h2 className="text-3xl font-bold tracking-tighter uppercase italic font-serif">
                         {showStatsDetail ==='library' ?'Library Insights' : showStatsDetail ==='playtime' ?'Playtime Analytics' :'Backlog Breakdown'}
                       </h2>
                       <button onClick={() => setShowStatsDetail(null)} className="p-2 hover:bg-white/10 rounded-full transition-colors">
@@ -4456,7 +4764,7 @@ export default function App() {
                                   ))}
                                 </div>
                               ) : (
-                                <p className="text-[11px] text-white/20 italic px-2">None of your backlog is on Game Pass.</p>
+                                <p className="text-[11px] text-white/20 italic px-2">None recently added.</p>
                               )}
                             </div>
 
@@ -4645,13 +4953,20 @@ export default function App() {
                                 )}
                                 <button onClick={() => { setGroupInput(''); setIsCreatingGroup(true); }} className="px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer text-white/50 hover:text-white hover:bg-white/10">Create</button>
                                 <button onClick={() => { setGroupInput(''); setIsJoiningGroup(true); }} className="px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer text-white/50 hover:text-white hover:bg-white/10">Join</button>
-                                {activeGroup?.created_by != null && user?.id != null && Number(activeGroup.created_by) === Number(user.id) && (
+                                {activeGroup && user?.id != null && (
                                   <>
                                     <div className="w-px h-4 bg-white/15 mx-0.5"/>
-                                    <button
-                                      onClick={() => { if (window.confirm(`Delete group "${activeGroup.name}"? This cannot be undone.`)) handleDeleteGroup(activeGroup.id); }}
-                                      className="px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer text-red-500/60 hover:text-red-400 hover:bg-red-500/10"
-                                    >Delete</button>
+                                    {Number(activeGroup.created_by) === Number(user.id) ? (
+                                      <button
+                                        onClick={() => { if (window.confirm(`Delete group "${activeGroup.name}"? This cannot be undone.`)) handleDeleteGroup(activeGroup.id); }}
+                                        className="px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer text-red-500/60 hover:text-red-400 hover:bg-red-500/10"
+                                      >Delete</button>
+                                    ) : (
+                                      <button
+                                        onClick={() => handleLeaveGroup(activeGroup.id, activeGroup.name)}
+                                        className="px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer text-orange-500/60 hover:text-orange-400 hover:bg-orange-500/10"
+                                      >Leave</button>
+                                    )}
                                   </>
                                 )}
                               </>
@@ -4667,7 +4982,21 @@ export default function App() {
                 </div>
               </div>
               {/* Right column: Add Game + Refresh + Clear — mirrors launcher's Add Quest / Clear Library */}
-              <div className="flex flex-wrap gap-4 items-center">
+              <div className="flex flex-col items-end gap-3">
+                {/* Member avatars — shared view only */}
+                {activeList === 'shared' && groupOwnership && groupOwnership.members.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[9px] font-bold uppercase tracking-widest text-white/30">Members</span>
+                    <div className="flex -space-x-2">
+                      {groupOwnership.members.map(m => (
+                        <MemberAvatar key={m.id} username={m.username} avatar={m.avatar} size="sm"
+                          onClick={(e) => { e.stopPropagation(); openMemberProfile(m); }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="flex flex-wrap gap-4 items-center">
                 <button
                   onClick={() => {
                     setAddToList(activeList);
@@ -4695,16 +5024,17 @@ export default function App() {
                     )}
                   </div>
                 )}
+                </div>
               </div>
             </div>
 
 
             {/* Section title row */}
             <div className="flex items-center justify-between">
-              <h3 className="text-xl font-bold flex items-center gap-2">
-                <BookOpen size={24} className="text-emerald-500"/>
+              <h3 className="text-xs font-bold uppercase tracking-widest text-white/50 flex items-center gap-2.5">
+                <BookOpen size={12} className="text-emerald-500/60"/>
                 {activeList ==='private' ?'My Backlog' :'Shared Backlog'}
-                <span className="text-sm font-normal text-white/40">{displayedGames.length} games</span>
+                <span className="font-normal normal-case tracking-normal text-white/30">{displayedGames.length} games</span>
               </h3>
               <div className="flex items-center gap-2">
                 {(() => {
@@ -4759,6 +5089,7 @@ export default function App() {
                       const allOwn = members.length > 0 && owners.length === members.length;
                       const someOwn = !allOwn && owners.length > 0;
                       const inLibrary = activeList === 'private' && libraryMatchMap.has(game.id);
+                      const hidePrice = libraryMatchMap.has(game.id) || (activeList === 'shared' && user != null && owners.includes(user.id));
                       return (
                     <div className={cn("relative aspect-[2/3] overflow-hidden rounded-2xl bg-white/5 transition-all",
                         allOwn || inLibrary ? "border-2 border-emerald-400" : "ring-1 ring-white/10")}
@@ -4776,7 +5107,7 @@ export default function App() {
                           <span className="text-[10px] bg-white/10 px-2 py-1 rounded text-white/70 font-bold">Click to add artwork</span>
                         </div>
                       ) : (
-                        <img src={game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.03]" referrerPolicy="no-referrer" onError={(e) => {
+                        <img src={game.artwork} alt={game.title} loading="lazy" className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.03]" referrerPolicy="no-referrer" onError={(e) => {
                             const target = e.target as HTMLImageElement;
                             if (target.src.includes('library_capsule_2x.jpg')) {
                               target.src = target.src.replace('library_capsule_2x.jpg','library_capsule.jpg');
@@ -4802,20 +5133,27 @@ export default function App() {
                           Now on Game Pass
                         </div>
                       )}
-                      {/* Member ownership avatars */}
+                      {/* Member ownership avatars / Schedule session button */}
                       {members.length > 0 && (
-                        <div className="absolute top-2 left-2 flex -space-x-1.5">
-                          {members.map(m => {
-                            const owns = owners.includes(m.id);
-                            return (
-                              <div key={m.id} className="relative" title={`${m.username}${owns ? ' ✓' : ''}`}>
-                                <img src={m.avatar || ''} alt={m.username}
-                                  onError={(e) => { const t = e.target as HTMLImageElement; const c = encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='16' fill='%23374151'/><text x='16' y='21' text-anchor='middle' fill='white' font-size='14' font-family='system-ui' font-weight='600'>${(m.username[0]||'?').toUpperCase()}</text></svg>`); t.src=`data:image/svg+xml,${c}`; t.onerror=null; }}
-                                  className={cn("w-6 h-6 rounded-full border-2 object-cover", owns ? "border-emerald-400" : "border-white/20 grayscale opacity-50")}/>
-                              </div>
-                            );
-                          })}
-                        </div>
+                        allOwn ? (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setSessionModal({ game, groupId: activeGroupId! }); setSessionDateTime(''); setSessionMessage(''); }}
+                            className="absolute top-2 left-2 z-20 flex items-center gap-1 bg-emerald-500/90 hover:bg-emerald-400 active:scale-95 text-white text-[9px] font-black px-2 py-1 rounded-full backdrop-blur-sm transition-all opacity-0 group-hover:opacity-100"
+                            title="Everyone has this game — schedule a session!"
+                          >
+                            <Calendar size={10}/>
+                            Play Together
+                          </button>
+                        ) : (
+                          <div className="absolute top-2 left-2 flex -space-x-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                            {members.map(m => (
+                              <MemberAvatar key={m.id} username={m.username} avatar={m.avatar} size="sm"
+                                owns={owners.includes(m.id)}
+                                onClick={(e) => { e.stopPropagation(); openMemberProfile(m); }}
+                              />
+                            ))}
+                          </div>
+                        )
                       )}
                       {/* Countdown / Coming Soon overlay for unreleased games */}
                       {(() => {
@@ -4921,7 +5259,7 @@ export default function App() {
                               </button>
                             )}
                             {epicFreeMap.has(game.title.toLowerCase().trim()) && (
-                              <button onClick={(e) => { e.stopPropagation(); openInBrowser(epicFreeMap.get(game.title.toLowerCase().trim())!); }}
+                              <button onClick={(e) => { e.stopPropagation(); { const u = epicFreeMap.get(game.title.toLowerCase().trim())!; const slug = u.match(/\/p\/([^/?]+)/)?.[1]; openInBrowser(slug ? `com.epicgames.launcher://store/p/${slug}` : u); }; }}
                                 className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest bg-[#0078f2]/20 px-2 py-1 rounded border border-[#0078f2]/30 hover:bg-[#0078f2]/40 transition-colors"
                               >
                                 <EpicIcon className="w-2.5 h-2.5 text-[#4da6ff]"/>
@@ -4929,7 +5267,7 @@ export default function App() {
                               </button>
                             )}
                           </div>
-                          {formatPrice(game.lowest_price) && (
+                          {!hidePrice && formatPrice(game.lowest_price) && (
                             <div className="flex items-center gap-2">
                               <Tag size={14} className="text-emerald-500"/>
                               <span className="font-bold text-emerald-500">{formatPrice(game.lowest_price)}</span>
@@ -4964,7 +5302,7 @@ export default function App() {
                       className="group relative aspect-[2/3] rounded-2xl overflow-hidden bg-[#1a1a1a] border border-white/10 cursor-pointer shadow-xl"
                       onClick={() => { setSearchQuery(suggestion.title); setCurrentTab('home'); window.scrollTo({ top: 0, behavior:'smooth' }); }}
 >
-                      <img src={suggestion.artwork} alt={suggestion.title} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.03]" referrerPolicy="no-referrer"/>
+                      <img src={suggestion.artwork} alt={suggestion.title} loading="lazy" className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.03]" referrerPolicy="no-referrer"/>
                       <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-3.5">
                         <div className="transform translate-y-4 group-hover:translate-y-0 transition-transform duration-300">
                           <h3 className="text-sm font-bold leading-tight mb-1.5">{suggestion.title}</h3>
@@ -5132,13 +5470,13 @@ export default function App() {
                     ))}
                   </div>
                 ) : tagGames.length > 0 ? (
-                  <HorizontalScrollRow title={`Trending ${selectedDiscoverTag} Games`} icon={<Tag size={20} className="text-blue-400"/>}>
+                  <HorizontalScrollRow title={`Trending ${selectedDiscoverTag} Games`} icon={<Tag size={12} className="text-blue-400/60"/>}>
                     {tagGames.map(game => (
                       <motion.div key={game.id} whileHover={{ y: -6, scale: 1.02 }}
                         onClick={() => handleDiscoverGameClick(game)}
                         className="group relative w-44 shrink-0 aspect-[2/3] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start"
                       >
-                        <img src={game.verticalArt || game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]" referrerPolicy="no-referrer"
+                        <img src={game.verticalArt || game.artwork} alt={game.title} loading="lazy" className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]" referrerPolicy="no-referrer"
                           onError={(e) => {
                             const img = e.target as HTMLImageElement;
                             const sid = game.steamAppID;
@@ -5178,9 +5516,9 @@ export default function App() {
                 )}
 
                 {[
-                  { list: discoverData.recentlyReleased, title: 'Trending on Steam', icon: <Sparkles size={24} className="text-yellow-400"/> },
-                  { list: discoverData.trending, title: 'Top Sellers', icon: <TrendingUp size={24} className="text-orange-400"/> },
-                  { list: discoverData.gamePass, title: 'Recently Added to Game Pass', icon: <span className="text-[#107c10] font-black text-base">✦</span> },
+                  { list: discoverData.recentlyReleased, title: 'Trending on Steam', icon: <Sparkles size={12} className="text-yellow-400/60"/> },
+                  { list: discoverData.trending, title: 'Top Sellers', icon: <TrendingUp size={12} className="text-orange-400/60"/> },
+                  { list: discoverData.gamePass, title: 'Recently Added to Game Pass', icon: <span className="text-[#107c10]/60 font-black text-[10px]">✦</span> },
                 ].map(({ list, title, icon }) => list.length > 0 && (
                   <HorizontalScrollRow key={title} title={title} icon={icon}>
                     {list.map((game) => (
@@ -5188,7 +5526,7 @@ export default function App() {
                         onClick={() => handleDiscoverGameClick(game)}
                         className="group relative w-44 shrink-0 aspect-[2/3] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start"
                       >
-                        <img src={game.verticalArt || game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]" referrerPolicy="no-referrer"
+                        <img src={game.verticalArt || game.artwork} alt={game.title} loading="lazy" className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]" referrerPolicy="no-referrer"
                           onError={(e) => {
                             const img = e.target as HTMLImageElement;
                             const sid = (game as any).steamAppID;
@@ -5233,7 +5571,7 @@ export default function App() {
 
 
                 {/* Suggested for You */}
-                <HorizontalScrollRow title="Suggested for You" icon={<Sparkles size={24} className="text-purple-400"/>}>
+                <HorizontalScrollRow title="Suggested for You" icon={<Sparkles size={12} className="text-purple-400/60"/>}>
                   {suggestedForYou === null ? (
                     Array.from({ length: 6 }).map((_, i) => (
                       <div key={i} className="w-44 shrink-0 aspect-[2/3] rounded-2xl bg-white/5 animate-pulse border border-white/5"/>
@@ -5458,10 +5796,10 @@ export default function App() {
             ) : (
               <div className="space-y-8">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-xl font-bold flex items-center gap-2">
-                    <Library size={24} className="text-blue-500"/>
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-white/50 flex items-center gap-2.5">
+                    <Library size={12} className="text-blue-500/60"/>
                     {showHiddenGames ? 'Hidden Games' : 'Library'}
-                    <span className="text-sm font-normal text-white/40">{filteredLauncherGames.length} games</span>
+                    <span className="font-normal normal-case tracking-normal text-white/30">{filteredLauncherGames.length} games</span>
                   </h3>
                   <div className="flex items-center gap-2">
                     <button onClick={() => setShowHiddenGames(!showHiddenGames)}
@@ -5494,7 +5832,7 @@ export default function App() {
                             </div>
                           </div>
                         )}
-                        <img src={game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.03]" referrerPolicy="no-referrer" onError={(e) => {
+                        <img src={game.artwork} alt={game.title} loading="lazy" className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.03]" referrerPolicy="no-referrer" onError={(e) => {
                             const target = e.target as HTMLImageElement;
                             if (target.src.includes('library_capsule_2x.jpg')) {
                               target.src = target.src.replace('library_capsule_2x.jpg','library_capsule.jpg');
@@ -5687,6 +6025,7 @@ export default function App() {
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => { if (!isLoading) setIsAdding(false); }} className="absolute inset-0 bg-black/60"/>
             <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.13 }} className="relative z-10 w-full max-w-xl bg-[#1a1a1a] rounded-3xl p-8 shadow-2xl border border-white/10">
+              <div className="absolute inset-0 pointer-events-none z-10" style={{ boxShadow: 'inset 0 0 50px rgba(0,0,0,0.5)', borderRadius: 'inherit' }}/>
               <div className="flex justify-between items-center mb-8">
                 <h2 className="text-3xl font-bold tracking-tighter uppercase italic font-serif">Add New Quest</h2>
                 <button onClick={() => setIsAdding(false)} disabled={isLoading} className="p-2 hover:bg-white/5 rounded-full transition-colors disabled:opacity-50 cursor-pointer">
@@ -5768,7 +6107,7 @@ export default function App() {
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-6">
             {/* Backdrop */}
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              onClick={() => { pendingEnrichId.current = null; setSelectedGame(null); setFriendsWhoOwn([]); setIsEditingArtwork(false); setIsEditingTags(false); setShowFriendsModal(false); setShowAchievementsModal(false); setConfirmDelete(null); setGameComments([]); setCommentInput(''); }}
+              onClick={() => { pendingEnrichId.current = null; setSelectedGame(null); setFriendsWhoOwn([]); setIsEditingArtwork(false); setIsEditingTags(false); setShowFriendsModal(false); setShowAchievementsModal(false); setConfirmDelete(null); setGameComments([]); setCommentInput(''); setWhoHasThisOpen(false); }}
               className="absolute inset-0 bg-black/80"/>
 
             <motion.div
@@ -5985,7 +6324,7 @@ export default function App() {
                         </button>
                       )}
                       {!('playtime' in selectedGame) && epicFreeMap.has(selectedGame.title.toLowerCase().trim()) && (
-                        <button onClick={() => openInBrowser(epicFreeMap.get(selectedGame.title.toLowerCase().trim())!)} className="flex items-center gap-1 text-[9px] font-mono uppercase tracking-widest px-2.5 py-1 bg-[#0078f2]/20 text-[#4da6ff] rounded-full border border-[#0078f2]/30 hover:bg-[#0078f2]/40 transition-colors font-bold cursor-pointer">
+                        <button onClick={() => { const u = epicFreeMap.get(selectedGame.title.toLowerCase().trim())!; const slug = u.match(/\/p\/([^/?]+)/)?.[1]; openInBrowser(slug ? `com.epicgames.launcher://store/p/${slug}` : u); }} className="flex items-center gap-1 text-[9px] font-mono uppercase tracking-widest px-2.5 py-1 bg-[#0078f2]/20 text-[#4da6ff] rounded-full border border-[#0078f2]/30 hover:bg-[#0078f2]/40 transition-colors font-bold cursor-pointer">
                           <EpicIcon className="w-2.5 h-2.5"/>Free on Epic
                         </button>
                       )}
@@ -6215,7 +6554,7 @@ export default function App() {
                       return (
                         <div className="grid grid-cols-3 gap-2">
                           {/\/app\/\d+/.test(logGame.steam_url || '') ? (
-                            <button onClick={() => openInBrowser(logGame.steam_url)} className="flex items-center justify-between p-3 bg-[#1b2838] border border-[#66c0f4]/20 rounded-2xl hover:border-[#66c0f4]/50 transition-all cursor-pointer">
+                            <button onClick={() => { const m = (logGame.steam_url || '').match(/\/app\/(\d+)/); openInBrowser(m ? `steam://store/${m[1]}` : logGame.steam_url); }} className="flex items-center justify-between p-3 bg-[#1b2838] border border-[#66c0f4]/20 rounded-2xl hover:border-[#66c0f4]/50 transition-all cursor-pointer">
                               <div className="flex items-center gap-2.5">
                                 <div className="w-9 h-9 bg-[#66c0f4]/10 rounded-xl flex items-center justify-center shrink-0"><SteamIcon className="w-5 h-5 text-[#66c0f4]"/></div>
                                 <div className="text-left"><p className="text-[8px] font-mono uppercase opacity-40 tracking-widest">Store</p><p className="font-bold text-sm text-[#66c0f4]">Steam</p></div>
@@ -6262,7 +6601,7 @@ export default function App() {
                             </button>
                           );
                           if (hasSteam) return (
-                            <button onClick={() => openInBrowser(sid ? `https://store.steampowered.com/app/${sid}/` : (selectedGame as any).steam_url)} className="flex items-center justify-between p-3 bg-[#1b2838] border border-[#66c0f4]/20 rounded-2xl hover:border-[#66c0f4]/50 transition-all cursor-pointer">
+                            <button onClick={() => openInBrowser(sid ? `steam://store/${sid}` : (selectedGame as any).steam_url)} className="flex items-center justify-between p-3 bg-[#1b2838] border border-[#66c0f4]/20 rounded-2xl hover:border-[#66c0f4]/50 transition-all cursor-pointer">
                               <div className="flex items-center gap-2.5">
                                 <div className="w-9 h-9 bg-[#66c0f4]/10 rounded-xl flex items-center justify-center shrink-0"><SteamIcon className="w-5 h-5 text-[#66c0f4]"/></div>
                                 <div className="text-left"><p className="text-[8px] font-mono uppercase opacity-40 tracking-widest">Store</p><p className="font-bold text-sm text-[#66c0f4]">Steam</p></div>
@@ -6387,7 +6726,7 @@ export default function App() {
                         const hasSteamAppId = /\/app\/\d+/.test((selectedGame as any).steam_url || '');
                         const lookupDone = !!(selectedGame as any)._steamLookupDone;
                         if (hasSteamAppId) return (
-                          <button onClick={() => openInBrowser((selectedGame as any).steam_url)} className="flex items-center justify-between p-3 bg-[#1b2838] border border-[#66c0f4]/20 rounded-2xl hover:border-[#66c0f4]/50 transition-all cursor-pointer">
+                          <button onClick={() => { const m = ((selectedGame as any).steam_url || '').match(/\/app\/(\d+)/); openInBrowser(m ? `steam://store/${m[1]}` : (selectedGame as any).steam_url); }} className="flex items-center justify-between p-3 bg-[#1b2838] border border-[#66c0f4]/20 rounded-2xl hover:border-[#66c0f4]/50 transition-all cursor-pointer">
                             <div className="flex items-center gap-2.5">
                               <div className="w-9 h-9 bg-[#66c0f4]/10 rounded-xl flex items-center justify-center shrink-0"><SteamIcon className="w-5 h-5 text-[#66c0f4]"/></div>
                               <div className="text-left"><p className="text-[8px] font-mono uppercase opacity-40 tracking-widest">Store</p><p className="font-bold text-sm text-[#66c0f4]">Steam</p></div>
@@ -6454,12 +6793,48 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* ── GROUP COMMENTS (shared games only) ── */}
+                  {/* ── GROUP COMMENTS + WHO HAS THIS (shared games only) ── */}
                   {(selectedGame as any).list_type === 'shared' && !(selectedGame as any)._external && (
                     <div className="pt-5 border-t border-white/5">
-                      <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 mb-3 flex items-center gap-2">
-                        <Users size={12}/> Group Discussion
-                      </p>
+                      <div className="flex items-center justify-between mb-3">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 flex items-center gap-2">
+                          <Users size={12}/> Group Discussion
+                        </p>
+                        {groupOwnership && groupOwnership.members.length > 0 && (
+                          <button
+                            onClick={() => setWhoHasThisOpen(o => !o)}
+                            className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-white/30 hover:text-white/60 transition-colors cursor-pointer"
+                          >
+                            <div className="flex -space-x-1.5">
+                              {groupOwnership.members.slice(0, 4).map(m => (
+                                <MemberAvatar key={m.id} username={m.username} avatar={m.avatar} size="xs"
+                                  owns={(groupOwnership.ownership[selectedGame.id] ?? []).includes(m.id)}
+                                />
+                              ))}
+                            </div>
+                            Who has this
+                            <ChevronDown size={10} className={cn("transition-transform duration-200", whoHasThisOpen && "rotate-180")} />
+                          </button>
+                        )}
+                      </div>
+                      {whoHasThisOpen && groupOwnership && (
+                        <div className="flex flex-wrap gap-2 mb-4 p-3 bg-white/[0.02] rounded-2xl border border-white/[0.06]">
+                          {groupOwnership.members.map(m => {
+                            const owns = (groupOwnership.ownership[selectedGame.id] ?? []).includes(m.id);
+                            return (
+                              <button key={m.id} onClick={() => openMemberProfile(m)}
+                                className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-white/[0.04] border border-white/[0.08] hover:bg-white/[0.08] transition-colors cursor-pointer"
+                              >
+                                <MemberAvatar username={m.username} avatar={m.avatar} size="xs" owns={owns} />
+                                <div className="text-left">
+                                  <p className="text-[10px] font-bold text-white/80 leading-none">{m.username}</p>
+                                  <p className={cn("text-[8px] font-mono mt-0.5", owns ? "text-emerald-400" : "text-white/25")}>{owns ? 'Owned' : 'Not owned'}</p>
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                       <div className="space-y-3 mb-3 max-h-48 overflow-y-auto">
                         {gameComments.length === 0 ? (
                           <p className="text-xs text-white/20 italic py-2">No comments yet — be the first!</p>
@@ -6503,9 +6878,10 @@ export default function App() {
                       const isInstalled = isLauncher && (selectedGame as LauncherGame).installed;
                       const platform = isLauncher ? (selectedGame as LauncherGame).platform : null;
                       const handleUninstallClick = () => {
-                        if (platform ==='steam') window.open(`steam://uninstall/${(selectedGame as LauncherGame).external_id}`,'_blank');
-                        else if (platform ==='xbox') window.open('ms-settings:appsfeatures','_blank');
-                        else if (platform ==='ea') window.open('ms-settings:appsfeatures','_blank');
+                        const externalId = (selectedGame as LauncherGame).external_id;
+                        if (platform === 'steam') window.open(`steam://uninstall/${externalId}`, '_blank');
+                        else if (platform === 'xbox') window.open('ms-xboxapp://', '_blank');
+                        else if (platform === 'ea') window.open('ea://', '_blank');
                       };
                       const isLocal = platform === 'local';
                       const isHideAction = isLauncher && !isInstalled && !isLocal;
@@ -6544,10 +6920,11 @@ export default function App() {
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80" onClick={() => setShowFriendsModal(false)}>
             <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}
               onClick={(e) => e.stopPropagation()}
-              className="bg-[#141414] border border-white/10 rounded-3xl p-6 md:p-8 w-full max-w-md max-h-[70vh] flex flex-col shadow-2xl"
+              className="relative bg-[#141414] border border-white/10 rounded-3xl p-6 md:p-8 w-full max-w-md max-h-[70vh] flex flex-col shadow-2xl"
 >
+              <div className="absolute inset-0 pointer-events-none z-10" style={{ boxShadow: 'inset 0 0 50px rgba(0,0,0,0.5)', borderRadius: 'inherit' }}/>
               <div className="flex items-center justify-between mb-6">
-                <h3 className="text-xl font-bold flex items-center gap-3">
+                <h3 className="text-xl font-bold tracking-tighter uppercase italic font-serif flex items-center gap-3">
                   <Users className="text-emerald-500" size={20}/>
                   Friends &amp; {selectedGame.title}
                 </h3>
@@ -6587,10 +6964,11 @@ export default function App() {
           return (
             <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80" onClick={() => setShowAchievementsModal(false)}>
               <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} onClick={(e) => e.stopPropagation()}
-                className="bg-[#141414] border border-white/10 rounded-3xl p-6 md:p-8 w-full max-w-2xl max-h-[80vh] flex flex-col shadow-2xl"
+                className="relative bg-[#141414] border border-white/10 rounded-3xl p-6 md:p-8 w-full max-w-2xl max-h-[80vh] flex flex-col shadow-2xl"
 >
+                <div className="absolute inset-0 pointer-events-none z-10" style={{ boxShadow: 'inset 0 0 50px rgba(0,0,0,0.5)', borderRadius: 'inherit' }}/>
                 <div className="flex items-center justify-between mb-6">
-                  <h3 className="text-xl font-bold flex items-center gap-3">
+                  <h3 className="text-xl font-bold tracking-tighter uppercase italic font-serif flex items-center gap-3">
                     <Trophy className="text-indigo-500"/>
                     Achievements
                     {achs.length> 0 && <span className="text-sm font-normal text-emerald-500 bg-emerald-500/10 px-3 py-1 rounded-full">{unlockedAchs.length}/ {achs.length} Unlocked</span>}
@@ -6678,14 +7056,15 @@ export default function App() {
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80" onClick={() => setShowRecentAchievements(false)}>
             <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}
               onClick={(e) => e.stopPropagation()}
-              className="bg-[#141414] border border-white/10 rounded-3xl p-6 md:p-8 w-full max-w-lg max-h-[75vh] flex flex-col shadow-2xl"
+              className="relative bg-[#141414] border border-white/10 rounded-3xl p-6 md:p-8 w-full max-w-lg max-h-[75vh] flex flex-col shadow-2xl"
 >
+              <div className="absolute inset-0 pointer-events-none z-10" style={{ boxShadow: 'inset 0 0 50px rgba(0,0,0,0.5)', borderRadius: 'inherit' }}/>
               <div className="flex items-center justify-between mb-6">
-                <h3 className="text-xl font-bold flex items-center gap-3">
+                <h3 className="text-xl font-bold tracking-tighter uppercase italic font-serif flex items-center gap-3">
                   <Trophy className="text-orange-500" size={20}/>
                   Recent Achievements
                   {homeData?.recentAchievements && homeData.recentAchievements.length> 0 && (
-                    <span className="text-sm font-normal text-orange-500 bg-orange-500/10 px-3 py-1 rounded-full">{homeData.recentAchievements.length} unlocked</span>
+                    <span className="text-sm font-normal not-italic font-sans normal-case tracking-normal text-orange-500 bg-orange-500/10 px-3 py-1 rounded-full">{homeData.recentAchievements.length} unlocked</span>
                   )}
                 </h3>
                 <button onClick={() => setShowRecentAchievements(false)} className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors cursor-pointer"><X size={20}/></button>
@@ -6732,6 +7111,7 @@ export default function App() {
             <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.13 }}
               className="relative z-10 w-full max-w-md bg-[#1a1a1a] rounded-3xl p-8 shadow-2xl border border-white/10"
 >
+              <div className="absolute inset-0 pointer-events-none z-10" style={{ boxShadow: 'inset 0 0 50px rgba(0,0,0,0.5)', borderRadius: 'inherit' }}/>
               <div className="flex justify-between items-center mb-6">
                 <h2 className="text-2xl font-bold tracking-tighter uppercase italic font-serif">Pick a Server</h2>
                 <button onClick={() => setShowDiscordGuildPicker(false)} className="p-2 hover:bg-white/5 rounded-full transition-colors cursor-pointer">
@@ -6842,407 +7222,77 @@ export default function App() {
       )}
 
       {/* ── COMPANIONS MODAL ── */}
-      <AnimatePresence>
-        {showQuestlogFriends && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 md:p-10">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              onClick={() => { setShowQuestlogFriends(false); setSelectedConvoFriend(null); setSelectedGroupConvo(null); setSettingsSaveMsg(null); }}
-              className="absolute inset-0 bg-black/85"/>
-            <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 16 }} transition={{ duration: 0.15 }}
-              className="relative w-full max-w-2xl bg-[#1a1a1a] rounded-[40px] border border-white/10 overflow-hidden flex flex-col max-h-[90vh] shadow-2xl">
-
-              {/* Header */}
-              <div className="px-8 pt-8 pb-6 border-b border-white/5 shrink-0 flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  <button onClick={() => { setAvatarInput(user?.avatar || ''); setFriendsModalTab('settings'); }}
-                    className="relative group w-11 h-11 rounded-full overflow-hidden border border-white/15 hover:border-white/40 transition-all shrink-0 focus:outline-none" title="Edit profile">
-                    <img src={user?.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user?.username}`} className="w-full h-full object-cover"/>
-                    <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"><Camera size={11} className="text-white"/></div>
-                  </button>
-                  <div>
-                    <h2 className="text-2xl font-black uppercase tracking-tighter">Companions</h2>
-                    <p className="text-[11px] text-white/40 font-medium mt-0.5">{user?.username}</p>
-                  </div>
-                </div>
-                <button onClick={() => { setShowQuestlogFriends(false); setSelectedConvoFriend(null); setSelectedGroupConvo(null); setSettingsSaveMsg(null); }} className="p-2 hover:bg-white/10 rounded-full transition-colors cursor-pointer"><X size={20}/></button>
-              </div>
-
-              {/* Tab bar */}
-              <div className="px-8 py-4 border-b border-white/5 shrink-0">
-                <div className="flex items-center bg-white/5 p-1 rounded-2xl border border-white/[0.08] w-fit gap-0.5">
-                  <button onClick={() => setFriendsModalTab('friends')}
-                    className={cn("px-5 py-2 rounded-xl text-[11px] font-bold uppercase tracking-widest transition-all cursor-pointer", friendsModalTab === 'friends' ? "bg-white text-[#141414] shadow-sm" : "text-white/50 hover:text-white")}>
-                    Companions
-                  </button>
-                  <button onClick={() => { setFriendsModalTab('messages'); fetchNotificationCount(); }}
-                    className={cn("relative px-5 py-2 rounded-xl text-[11px] font-bold uppercase tracking-widest transition-all cursor-pointer", friendsModalTab === 'messages' ? "bg-white text-[#141414] shadow-sm" : "text-white/50 hover:text-white")}>
-                    Chats
-                    {notificationCount > 0 && <span className="absolute -top-1 -right-1 min-w-[14px] h-3.5 bg-emerald-500 text-white text-[8px] font-black rounded-full flex items-center justify-center px-0.5">{notificationCount > 9 ? '9+' : notificationCount}</span>}
-                  </button>
-                  <button onClick={() => setFriendsModalTab('settings')}
-                    className={cn("px-5 py-2 rounded-xl text-[11px] font-bold uppercase tracking-widest transition-all cursor-pointer", friendsModalTab === 'settings' ? "bg-white text-[#141414] shadow-sm" : "text-white/50 hover:text-white")}>
-                    Settings
-                  </button>
-                </div>
-              </div>
-
-              {/* ── Companions tab ── */}
-              {friendsModalTab === 'friends' && (
-                <div className="flex flex-col flex-1 overflow-hidden">
-                  {/* Pending requests */}
-                  {pendingRequests.length > 0 && (
-                    <div className="px-8 pt-5 pb-4 border-b border-white/5 shrink-0">
-                      <p className="text-[10px] font-bold uppercase tracking-widest text-amber-400 mb-3">Companion Requests ({pendingRequests.length})</p>
-                      <div className="space-y-2">
-                        {pendingRequests.map(u => (
-                          <div key={u.id} className="flex items-center justify-between px-4 py-3 rounded-2xl bg-amber-500/5 border border-amber-500/15">
-                            <div className="flex items-center gap-3">
-                              <img src={u.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.username}`} className="w-8 h-8 rounded-full object-cover"/>
-                              <span className="text-sm font-bold">{u.username}</span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <button onClick={() => { addFriend(u.username); setPendingRequests(p => p.filter(r => r.id !== u.id)); }} className="px-3 py-1.5 rounded-xl bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/40 text-[10px] font-bold uppercase tracking-widest transition-colors cursor-pointer">Accept</button>
-                              <button onClick={() => { removeFriend(u.id); setPendingRequests(p => p.filter(r => r.id !== u.id)); }} className="px-3 py-1.5 rounded-xl bg-white/5 text-white/40 hover:bg-red-500/20 hover:text-red-400 text-[10px] font-bold uppercase tracking-widest transition-colors cursor-pointer">Decline</button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {/* Search */}
-                  <div className="px-8 py-5 border-b border-white/5 shrink-0">
-                    <div className="relative">
-                      <Search size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-white/30"/>
-                      <input type="text" placeholder="Search by username to add companions..." value={friendSearch}
-                        onChange={e => { setFriendSearch(e.target.value); searchUsers(e.target.value); }}
-                        className="w-full bg-white/5 border border-white/10 rounded-2xl py-3 pl-10 pr-4 text-sm focus:outline-none focus:border-white/30 transition-all"
-                      />
-                    </div>
-                    {friendSearchResults.length > 0 && (
-                      <div className="mt-3 bg-black/40 border border-white/10 rounded-2xl overflow-hidden">
-                        {friendSearchResults.map(u => {
-                          const alreadyFriend = appFriends.some(f => f.id === u.id);
-                          return (
-                            <div key={u.id} className="flex items-center justify-between px-4 py-3 hover:bg-white/5 transition-colors border-b border-white/5 last:border-0">
-                              <div className="flex items-center gap-3">
-                                <img src={u.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.username}`} className="w-8 h-8 rounded-full object-cover"/>
-                                <span className="text-sm font-medium">{u.username}</span>
-                              </div>
-                              {alreadyFriend
-                                ? <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-500/70">Companions</span>
-                                : <button onClick={() => addFriend(u.username)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/40 transition-colors text-[10px] font-bold uppercase tracking-widest cursor-pointer"><UserPlus size={12}/> Add</button>
-                              }
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                  {/* Companions list */}
-                  <div className="overflow-y-auto flex-1 px-8 py-6 space-y-3">
-                    {appFriends.length === 0 ? (
-                      <div className="py-16 text-center">
-                        <div className="w-16 h-16 rounded-3xl bg-white/5 border border-white/8 flex items-center justify-center mx-auto mb-4"><Users size={28} className="opacity-20"/></div>
-                        <p className="text-sm font-bold text-white/30">No companions yet</p>
-                        <p className="text-xs text-white/20 mt-1">Search by username above to connect</p>
-                      </div>
-                    ) : appFriends.map(friend => (
-                      <div key={friend.id} className="rounded-3xl bg-white/[0.03] border border-white/[0.08] overflow-hidden">
-                        <div className="flex items-center justify-between px-5 py-4">
-                          <button className="flex items-center gap-3.5 flex-1 text-left cursor-pointer" onClick={() => fetchFriendActivity(friend.id)}>
-                            <div className="relative shrink-0">
-                              <img src={friend.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${friend.username}`} className="w-10 h-10 rounded-full object-cover border border-white/10"/>
-                              <span className={cn("absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[#1a1a1a]", friend.online_status === 'online' || friend.current_game ? "bg-emerald-500" : "bg-white/20")}/>
-                            </div>
-                            <div>
-                              <p className="text-sm font-bold">{friend.username}</p>
-                              {friend.current_game
-                                ? <p className="text-[10px] text-emerald-400 font-mono mt-0.5">Playing {friend.current_game}</p>
-                                : <p className="text-[10px] text-white/30 font-mono mt-0.5 capitalize">{friend.online_status || 'offline'}</p>
-                              }
-                            </div>
-                          </button>
-                          <div className="flex items-center gap-1 shrink-0">
-                            <button onClick={() => openConversation(friend)} title="Message" className="p-2 rounded-xl text-white/30 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors cursor-pointer"><MessageCircle size={15}/></button>
-                            <button onClick={() => removeFriend(friend.id)} className="p-2 rounded-xl text-white/20 hover:text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer"><UserMinus size={15}/></button>
-                            <button onClick={() => fetchFriendActivity(friend.id)} className="p-2 rounded-xl text-white/20 hover:text-white/60 hover:bg-white/5 transition-colors cursor-pointer">
-                              <ChevronDown size={15} className={cn("transition-transform", expandedFriend === friend.id && "rotate-180")}/>
-                            </button>
-                          </div>
-                        </div>
-                        {expandedFriend === friend.id && (
-                          <div className="px-5 pb-5 border-t border-white/5 pt-4 space-y-5">
-                            {/* Recently Added */}
-                            <div>
-                              <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 mb-3">Recently Added</p>
-                              {!friendActivity[friend.id] || friendActivity[friend.id].length === 0 ? (
-                                <p className="text-xs text-white/20 italic">Nothing yet</p>
-                              ) : (
-                                <div className="grid grid-cols-5 gap-2">
-                                  {friendActivity[friend.id].slice(0, 10).map((g, i) => {
-                                    const steamAppId = g.steam_url?.match(/\/app\/(\d+)/)?.[1];
-                                    return (
-                                      <div key={i} onClick={() => handleDiscoverGameClick({ _external: true, id: steamAppId || g.title, title: g.title, artwork: g.artwork || '', verticalArt: g.artwork, banner: g.banner || (steamAppId ? `https://cdn.akamai.steamstatic.com/steam/apps/${steamAppId}/library_hero.jpg` : undefined), steamAppID: steamAppId || undefined, steam_url: steamAppId ? `https://store.steampowered.com/app/${steamAppId}/` : undefined } as any)}
-                                        className="relative aspect-[2/3] rounded-xl overflow-hidden bg-white/5 border border-white/10 cursor-pointer hover:opacity-80 transition-opacity" title={g.title}>
-                                        {g.artwork ? <img src={g.artwork} alt={g.title} className="w-full h-full object-cover" referrerPolicy="no-referrer"/> : <div className="w-full h-full flex items-center justify-center"><Gamepad2 size={14} className="opacity-20"/></div>}
-                                        <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent flex items-end p-1.5"><span className="text-[8px] font-bold leading-tight line-clamp-2 text-white/90">{g.title}</span></div>
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              )}
-                            </div>
-                            {/* Games in Common */}
-                            <div>
-                              <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-500/60 mb-3">In Common</p>
-                              {!commonGames[friend.id] || commonGames[friend.id].length === 0 ? (
-                                <p className="text-xs text-white/20 italic">No games in common yet</p>
-                              ) : (
-                                <div className="grid grid-cols-5 gap-2">
-                                  {commonGames[friend.id].slice(0, 10).map((g, i) => (
-                                    <div key={i} className="relative aspect-[2/3] rounded-xl overflow-hidden bg-white/5 border border-emerald-500/20 cursor-default" title={g.title}>
-                                      {g.artwork ? <img src={g.artwork} alt={g.title} className="w-full h-full object-cover" referrerPolicy="no-referrer"/> : <div className="w-full h-full flex items-center justify-center"><Gamepad2 size={14} className="opacity-20"/></div>}
-                                      <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent flex items-end p-1.5"><span className="text-[8px] font-bold leading-tight line-clamp-2 text-white/90">{g.title}</span></div>
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* ── Chats tab ── */}
-              {friendsModalTab === 'messages' && (
-                <div className="flex flex-1 overflow-hidden">
-                  {/* Sidebar */}
-                  <div className="w-52 border-r border-white/[0.08] flex flex-col shrink-0 overflow-y-auto py-5 px-3">
-                    {/* Group chats */}
-                    {groups.length > 0 && (
-                      <div className="mb-4">
-                        <p className="text-[9px] font-bold uppercase tracking-widest text-white/30 mb-2 px-2">Group Chats</p>
-                        {groups.map(g => (
-                          <button key={g.id} onClick={() => openGroupConversation(g)}
-                            className={cn("w-full flex items-center gap-2.5 px-3 py-2.5 rounded-2xl transition-colors cursor-pointer text-left mb-0.5",
-                              selectedGroupConvo?.id === g.id && !selectedConvoFriend ? "bg-purple-500/15 border border-purple-500/20" : "hover:bg-white/5")}>
-                            <div className="w-8 h-8 rounded-xl bg-purple-500/20 border border-purple-500/20 flex items-center justify-center shrink-0">
-                              <Users size={14} className="text-purple-400"/>
-                            </div>
-                            <span className="text-sm font-semibold truncate">{g.name}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    {/* Direct messages */}
-                    <div>
-                      <p className="text-[9px] font-bold uppercase tracking-widest text-white/30 mb-2 px-2">Direct</p>
-                      {appFriends.length === 0 ? (
-                        <p className="text-xs text-white/20 italic px-2">Add companions to message</p>
-                      ) : appFriends.map(f => (
-                        <button key={f.id} onClick={() => openConversation(f)}
-                          className={cn("w-full flex items-center gap-2.5 px-3 py-2.5 rounded-2xl transition-colors cursor-pointer text-left mb-0.5",
-                            selectedConvoFriend?.id === f.id ? "bg-white/10" : "hover:bg-white/5")}>
-                          <img src={f.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${f.username}`} className="w-8 h-8 rounded-full object-cover shrink-0"/>
-                          <span className="text-sm font-medium truncate">{f.username}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Conversation pane */}
-                  <div className="flex-1 flex flex-col overflow-hidden">
-                    {!selectedConvoFriend && !selectedGroupConvo ? (
-                      <div className="flex-1 flex items-center justify-center">
-                        <div className="text-center">
-                          <div className="w-14 h-14 rounded-3xl bg-white/5 border border-white/8 flex items-center justify-center mx-auto mb-3"><MessageCircle size={24} className="opacity-20"/></div>
-                          <p className="text-sm font-bold text-white/30">Select a chat to start messaging</p>
-                        </div>
-                      </div>
-                    ) : selectedConvoFriend ? (
-                      <>
-                        <div className="flex items-center gap-3 px-6 py-4 border-b border-white/[0.08] shrink-0">
-                          <img src={selectedConvoFriend.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${selectedConvoFriend.username}`} className="w-9 h-9 rounded-full object-cover"/>
-                          <p className="text-sm font-bold">{selectedConvoFriend.username}</p>
-                        </div>
-                        <div className="flex-1 overflow-y-auto p-5 space-y-3">
-                          {convoMessages.length === 0 ? (
-                            <div className="flex items-center justify-center h-full"><p className="text-sm text-white/20 italic">No messages yet — say hi!</p></div>
-                          ) : convoMessages.map((msg: any) => {
-                            const isMe = msg.sender_id === user?.id;
-                            return (
-                              <div key={msg.id} className={cn("flex flex-col max-w-[80%]", isMe ? "ml-auto items-end" : "items-start")}>
-                                {msg.game_title && (
-                                  <div onClick={() => handleDiscoverGameClick({ _external: true, id: msg.steam_app_id || msg.game_title, title: msg.game_title, artwork: msg.game_artwork || '', verticalArt: msg.game_artwork, banner: msg.steam_app_id ? `https://cdn.akamai.steamstatic.com/steam/apps/${msg.steam_app_id}/library_hero.jpg` : undefined, steamAppID: msg.steam_app_id || undefined } as any)}
-                                    className={cn("flex items-center gap-3 p-3 rounded-2xl border mb-1.5 w-fit cursor-pointer transition-opacity hover:opacity-80", isMe ? "bg-emerald-600/20 border-emerald-500/30" : "bg-white/5 border-white/10")}>
-                                    {msg.game_artwork && <img src={msg.game_artwork} className="w-9 h-12 rounded-lg object-cover shrink-0" referrerPolicy="no-referrer"/>}
-                                    <div>
-                                      <p className="text-[9px] font-bold uppercase tracking-widest text-white/40 mb-0.5">Game Recommendation</p>
-                                      <p className="text-sm font-bold leading-tight">{msg.game_title}</p>
-                                      <p className="text-[10px] text-white/30 mt-0.5">Click to view details</p>
-                                    </div>
-                                  </div>
-                                )}
-                                {msg.content && <div className={cn("px-4 py-2.5 rounded-2xl text-sm", isMe ? "bg-emerald-600 text-white rounded-br-sm" : "bg-white/10 text-white rounded-bl-sm")}>{msg.content}</div>}
-                                <span className="text-[9px] text-white/20 mt-1 px-1">{new Date(msg.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</span>
-                              </div>
-                            );
-                          })}
-                        </div>
-                        <div className="p-4 border-t border-white/[0.08] shrink-0">
-                          <div className="flex items-center gap-2">
-                            <input type="text" value={convoInput} onChange={e => setConvoInput(e.target.value)}
-                              onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendConvoMessage()}
-                              placeholder={`Message ${selectedConvoFriend.username}...`}
-                              className="flex-1 bg-white/5 border border-white/10 rounded-2xl py-2.5 px-4 text-sm focus:outline-none focus:border-white/30 transition-all"
-                            />
-                            <button onClick={sendConvoMessage} disabled={!convoInput.trim()} className="p-2.5 rounded-2xl bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-30 cursor-pointer"><Send size={15}/></button>
-                          </div>
-                        </div>
-                      </>
-                    ) : selectedGroupConvo ? (
-                      <>
-                        <div className="flex items-center gap-3 px-6 py-4 border-b border-white/[0.08] shrink-0">
-                          <div className="w-9 h-9 rounded-xl bg-purple-500/20 border border-purple-500/20 flex items-center justify-center shrink-0"><Users size={15} className="text-purple-400"/></div>
-                          <div>
-                            <p className="text-sm font-bold">{selectedGroupConvo.name}</p>
-                            <p className="text-[10px] text-white/30 font-mono">#{selectedGroupConvo.invite_code}</p>
-                          </div>
-                        </div>
-                        <div className="flex-1 overflow-y-auto p-5 space-y-3">
-                          {groupMessages.length === 0 ? (
-                            <div className="flex items-center justify-center h-full"><p className="text-sm text-white/20 italic">No messages yet — start the conversation!</p></div>
-                          ) : groupMessages.map((msg: any) => {
-                            const isMe = msg.sender_id === user?.id;
-                            return (
-                              <div key={msg.id} className={cn("flex flex-col max-w-[80%]", isMe ? "ml-auto items-end" : "items-start")}>
-                                {!isMe && <span className="text-[10px] font-bold text-white/40 mb-1 px-1">{msg.sender_username}</span>}
-                                <div className={cn("px-4 py-2.5 rounded-2xl text-sm", isMe ? "bg-purple-600 text-white rounded-br-sm" : "bg-white/10 text-white rounded-bl-sm")}>{msg.content}</div>
-                                <span className="text-[9px] text-white/20 mt-1 px-1">{new Date(msg.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</span>
-                              </div>
-                            );
-                          })}
-                        </div>
-                        <div className="p-4 border-t border-white/[0.08] shrink-0">
-                          <div className="flex items-center gap-2">
-                            <input type="text" value={groupConvoInput} onChange={e => setGroupConvoInput(e.target.value)}
-                              onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendGroupMessage()}
-                              placeholder={`Message ${selectedGroupConvo.name}...`}
-                              className="flex-1 bg-white/5 border border-white/10 rounded-2xl py-2.5 px-4 text-sm focus:outline-none focus:border-white/30 transition-all"
-                            />
-                            <button onClick={sendGroupMessage} disabled={!groupConvoInput.trim()} className="p-2.5 rounded-2xl bg-purple-600 text-white hover:bg-purple-500 transition-colors disabled:opacity-30 cursor-pointer"><Send size={15}/></button>
-                          </div>
-                        </div>
-                      </>
-                    ) : null}
-                  </div>
-                </div>
-              )}
-
-              {/* ── Settings tab ── */}
-              {friendsModalTab === 'settings' && (
-                <div className="flex-1 overflow-y-auto px-8 py-6 space-y-5">
-                  {settingsSaveMsg && (
-                    <div className={cn("px-5 py-3 rounded-2xl text-sm font-medium text-center", settingsSaveMsg.type === 'success' ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/15" : "bg-red-500/10 text-red-400 border border-red-500/15")}>
-                      {settingsSaveMsg.text}
-                    </div>
-                  )}
-
-                  {/* Avatar */}
-                  <div className="p-5 rounded-3xl bg-white/[0.03] border border-white/[0.08]">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-4">Avatar</p>
-                    <div className="flex items-center gap-4">
-                      <img src={avatarInput || user?.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user?.username}`} className="w-14 h-14 rounded-full object-cover border border-white/15 shrink-0"/>
-                      <div className="flex-1 space-y-2">
-                        <input type="text" placeholder="Paste image URL..." value={avatarInput} onChange={e => setAvatarInput(e.target.value)}
-                          className="w-full bg-white/5 border border-white/10 rounded-2xl py-2.5 px-4 text-sm focus:outline-none focus:border-white/30 transition-all"
-                        />
-                        <div className="flex gap-2">
-                          <button onClick={() => { setAvatarInput(''); saveAvatar(); }} className="flex-1 py-2 rounded-xl bg-white/5 border border-white/10 text-[10px] font-bold uppercase tracking-widest text-white/40 hover:bg-white/10 transition-colors cursor-pointer">Remove</button>
-                          <button onClick={saveAvatar} className="flex-1 py-2 rounded-xl bg-emerald-600 text-white text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-500 transition-colors cursor-pointer">Save Avatar</button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Privacy */}
-                  <div className="p-5 rounded-3xl bg-white/[0.03] border border-white/[0.08]">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-4">Privacy</p>
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-semibold">Hide activity from companions</p>
-                        <p className="text-[10px] text-white/30 mt-0.5">Companions won't see your log activity or recent games</p>
-                      </div>
-                      <button
-                        onClick={() => { const next = !activityPrivate; setActivityPrivate(next); saveSettings({ activity_private: next }); }}
-                        className={cn("shrink-0 ml-4 rounded-full transition-colors cursor-pointer flex items-center", activityPrivate ? "bg-emerald-500" : "bg-white/15")}
-                        style={{ width: 40, height: 22, minWidth: 40, padding: '3px' }}
-                      >
-                        <span className={cn("w-4 h-4 rounded-full bg-white shadow transition-transform block", activityPrivate ? "translate-x-[18px]" : "translate-x-0")}/>
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Username */}
-                  <div className="p-5 rounded-3xl bg-white/[0.03] border border-white/[0.08]">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-4">Username</p>
-                    <div className="flex gap-2">
-                      <input type="text" placeholder={user?.username || 'New username'} value={settingsUsername} onChange={e => setSettingsUsername(e.target.value)}
-                        className="flex-1 bg-white/5 border border-white/10 rounded-2xl py-2.5 px-4 text-sm focus:outline-none focus:border-white/30 transition-all"
-                      />
-                      <button onClick={() => { if (settingsUsername.trim()) { saveSettings({ username: settingsUsername.trim() }); setSettingsUsername(''); } }}
-                        disabled={!settingsUsername.trim()}
-                        className="px-4 py-2 rounded-2xl bg-emerald-600 text-white text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-500 transition-colors disabled:opacity-30 cursor-pointer shrink-0">
-                        Save
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Password */}
-                  <div className="p-5 rounded-3xl bg-white/[0.03] border border-white/[0.08]">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-4">Password</p>
-                    <div className="space-y-2">
-                      <input type="password" placeholder="Current password" value={settingsCurrentPwd} onChange={e => setSettingsCurrentPwd(e.target.value)}
-                        className="w-full bg-white/5 border border-white/10 rounded-2xl py-2.5 px-4 text-sm focus:outline-none focus:border-white/30 transition-all"
-                      />
-                      <input type="password" placeholder="New password" value={settingsNewPwd} onChange={e => setSettingsNewPwd(e.target.value)}
-                        className="w-full bg-white/5 border border-white/10 rounded-2xl py-2.5 px-4 text-sm focus:outline-none focus:border-white/30 transition-all"
-                      />
-                      <input type="password" placeholder="Confirm new password" value={settingsConfirmPwd} onChange={e => setSettingsConfirmPwd(e.target.value)}
-                        className="w-full bg-white/5 border border-white/10 rounded-2xl py-2.5 px-4 text-sm focus:outline-none focus:border-white/30 transition-all"
-                      />
-                      <button
-                        onClick={() => {
-                          if (!settingsCurrentPwd || !settingsNewPwd) return;
-                          if (settingsNewPwd !== settingsConfirmPwd) { setSettingsSaveMsg({ type: 'error', text: "Passwords don't match" }); setTimeout(() => setSettingsSaveMsg(null), 4000); return; }
-                          saveSettings({ current_password: settingsCurrentPwd, new_password: settingsNewPwd });
-                        }}
-                        disabled={!settingsCurrentPwd || !settingsNewPwd || !settingsConfirmPwd}
-                        className="w-full py-2.5 rounded-2xl bg-emerald-600 text-white text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-500 transition-colors disabled:opacity-30 cursor-pointer mt-1">
-                        Change Password
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Sign out */}
-                  <button onClick={handleLogout} className="w-full py-3 rounded-2xl bg-red-500/8 border border-red-500/15 text-red-400 text-[10px] font-bold uppercase tracking-widest hover:bg-red-500/15 transition-colors cursor-pointer">
-                    Sign Out
-                  </button>
-                </div>
-              )}
-
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      <CompanionsModal
+        showQuestlogFriends={showQuestlogFriends}
+        setShowQuestlogFriends={setShowQuestlogFriends}
+        user={user}
+        token={token}
+        friendsModalTab={friendsModalTab}
+        setFriendsModalTab={setFriendsModalTab}
+        notificationCount={notificationCount}
+        pendingRequests={pendingRequests}
+        setPendingRequests={setPendingRequests}
+        friendSearch={friendSearch}
+        setFriendSearch={setFriendSearch}
+        friendSearchResults={friendSearchResults}
+        appFriends={appFriends}
+        sentFriendRequests={sentFriendRequests}
+        friendActivity={friendActivity}
+        commonGames={commonGames}
+        expandedFriend={expandedFriend}
+        convoMessages={convoMessages}
+        convoInput={convoInput}
+        setConvoInput={setConvoInput}
+        selectedConvoFriend={selectedConvoFriend}
+        setSelectedConvoFriend={setSelectedConvoFriend}
+        groups={groups}
+        groupMessages={groupMessages}
+        groupConvoInput={groupConvoInput}
+        setGroupConvoInput={setGroupConvoInput}
+        selectedGroupConvo={selectedGroupConvo}
+        groupOwnership={groupOwnership}
+        avatarInput={avatarInput}
+        setAvatarInput={setAvatarInput}
+        activityPrivate={activityPrivate}
+        setActivityPrivate={setActivityPrivate}
+        settingsUsername={settingsUsername}
+        setSettingsUsername={setSettingsUsername}
+        settingsCurrentPwd={settingsCurrentPwd}
+        setSettingsCurrentPwd={setSettingsCurrentPwd}
+        settingsNewPwd={settingsNewPwd}
+        setSettingsNewPwd={setSettingsNewPwd}
+        settingsConfirmPwd={settingsConfirmPwd}
+        setSettingsConfirmPwd={setSettingsConfirmPwd}
+        settingsSaveMsg={settingsSaveMsg}
+        setSettingsSaveMsg={setSettingsSaveMsg}
+        upcomingSessions={upcomingSessions}
+        addFriend={addFriend}
+        removeFriend={removeFriend}
+        searchUsers={searchUsers}
+        fetchFriendActivity={fetchFriendActivity}
+        fetchNotificationCount={fetchNotificationCount}
+        openConversation={openConversation}
+        openGroupConversation={openGroupConversation}
+        openMemberProfile={openMemberProfile}
+        handleDiscoverGameClick={handleDiscoverGameClick}
+        handleLogout={handleLogout}
+        saveAvatar={saveAvatar}
+        saveSettings={saveSettings}
+        sendConvoMessage={sendConvoMessage}
+        sendGroupMessage={sendGroupMessage}
+        addToCalendar={addToCalendar}
+        setSessionModal={setSessionModal}
+        setSessionDateTime={setSessionDateTime}
+        setSessionMessage={setSessionMessage}
+        setExpandedFriend={setExpandedFriend}
+        markMessagesRead={remoteMarkMessagesRead}
+      />
 
       {/* ── AVATAR EDIT MODAL ── */}
       {showAvatarEdit && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setShowAvatarEdit(false)}>
-          <div className="bg-[#141414] border border-white/10 rounded-3xl w-full max-w-sm p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
+          <div className="relative bg-[#141414] border border-white/10 rounded-3xl w-full max-w-sm p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="absolute inset-0 pointer-events-none z-10" style={{ boxShadow: 'inset 0 0 50px rgba(0,0,0,0.5)', borderRadius: 'inherit' }}/>
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-lg font-bold">Change Avatar</h2>
               <button onClick={() => setShowAvatarEdit(false)} className="p-2 rounded-full hover:bg-white/10 transition-colors"><X size={16}/></button>
@@ -7264,6 +7314,33 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ── SCHEDULE SESSION MODAL ── */}
+      <ScheduleSessionModal
+        sessionModal={sessionModal}
+        sessionDateTime={sessionDateTime}
+        sessionMessage={sessionMessage}
+        sessionSending={sessionSending}
+        setSessionModal={setSessionModal}
+        setSessionDateTime={setSessionDateTime}
+        setSessionMessage={setSessionMessage}
+        handleSendSessionInvite={handleSendSessionInvite}
+      />
+
+      {/* ── DAILY DIGEST MODAL ── */}
+      <DailyDigestModal
+        showDailyDigest={showDailyDigest}
+        sessionInvites={sessionInvites}
+        homeData={homeData}
+        digestLastSeen={digestLastSeen}
+        digestLibraryActivity={digestLibraryActivity}
+        user={user}
+        games={games}
+        setShowDailyDigest={setShowDailyDigest}
+        dismissSessionInvite={dismissSessionInvite}
+        setSelectedGame={setSelectedGame}
+        addToCalendar={addToCalendar}
+      />
     </div>
   );
 }

@@ -23,6 +23,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
     password TEXT NOT NULL,
+    email TEXT UNIQUE,
     steam_id TEXT,
     xbox_id TEXT,
     xbox_refresh_token TEXT,
@@ -140,6 +141,51 @@ db.exec(`
     FOREIGN KEY (game_id) REFERENCES launcher_games(id) ON DELETE CASCADE
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_playtime_daily ON playtime_logs(user_id, game_id, date);
+
+  CREATE TABLE IF NOT EXISTS session_invites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id INTEGER NOT NULL,
+    game_id INTEGER,
+    game_title TEXT NOT NULL,
+    scheduled_at TEXT NOT NULL,
+    message TEXT,
+    created_by INTEGER NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS session_invite_reads (
+    invite_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    PRIMARY KEY (invite_id, user_id),
+    FOREIGN KEY (invite_id) REFERENCES session_invites(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS user_library (
+    user_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    PRIMARY KEY (user_id, title),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS group_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id INTEGER NOT NULL,
+    sender_id INTEGER,
+    content TEXT NOT NULL,
+    created_at DATETIME DEFAULT (datetime('now')),
+    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE SET NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS group_message_reads (
+    message_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    PRIMARY KEY (message_id, user_id),
+    FOREIGN KEY (message_id) REFERENCES group_messages(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
 `);
 
 // Migration for existing databases to ensure FK constraints and ON DELETE CASCADE
@@ -256,6 +302,8 @@ try {
     try { db.prepare("ALTER TABLE games ADD COLUMN price_dropped INTEGER DEFAULT 0").run(); } catch {}
     try { db.prepare("ALTER TABLE games ADD COLUMN game_pass_new INTEGER DEFAULT 0").run(); } catch {}
     try { db.prepare("ALTER TABLE games ADD COLUMN game_pass_added_at TEXT").run(); } catch {}
+    try { db.prepare("ALTER TABLE users ADD COLUMN email TEXT").run(); } catch {}
+    try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL"); } catch {}
 
     // 3. Fix games if missing constraints or columns
     if (gamesSchema && (!gamesSchema.sql.includes("REFERENCES users(id)") || !gamesSchema.sql.includes("release_date") || !gamesSchema.sql.includes("metacritic") || !gamesSchema.sql.includes("tags") || !gamesSchema.sql.includes("banner") || !gamesSchema.sql.includes("logo"))) {
@@ -792,19 +840,44 @@ async function startServer() {
 
   // Auth Routes
   app.post("/api/auth/register", async (req, res) => {
-    const { username, password } = req.body;
+    const { username, password, email } = req.body;
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: "A valid email address is required" });
+    }
     try {
       const hashedPassword = await bcrypt.hash(password, 10);
-      const info = db.prepare("INSERT INTO users (username, password) VALUES (?, ?)").run(username, hashedPassword);
+      const info = db.prepare("INSERT INTO users (username, password, email) VALUES (?, ?, ?)").run(username, hashedPassword, email.toLowerCase().trim());
       const token = jwt.sign({ id: info.lastInsertRowid, username }, JWT_SECRET);
       res.json({ token, user: { id: info.lastInsertRowid, username } });
     } catch (error) {
       if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-        res.status(400).json({ error: "Username already exists" });
+        const existing = db.prepare("SELECT username FROM users WHERE username = ?").get(username);
+        if (existing) {
+          res.status(400).json({ error: "Username already exists" });
+        } else {
+          res.status(400).json({ error: "Email address already in use" });
+        }
       } else {
         res.status(500).json({ error: "Registration failed" });
       }
     }
+  });
+
+  app.post("/api/auth/reset-password", async (req, res) => {
+    const { username, email, newPassword } = req.body;
+    if (!username || !email || !newPassword) {
+      return res.status(400).json({ error: "Username, email, and new password are required" });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters" });
+    }
+    const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
+    if (!user || !user.email || user.email !== email.toLowerCase().trim()) {
+      return res.status(400).json({ error: "No account found with that username and email combination" });
+    }
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    db.prepare("UPDATE users SET password = ? WHERE id = ?").run(hashedPassword, user.id);
+    res.json({ success: true });
   });
 
   app.post("/api/auth/login", async (req, res) => {
@@ -6269,6 +6342,7 @@ async function getIgdbToken() {
         recentlyPlayed,
         friendsOnline: friendsOnlineSplit,
         friendsActivity: (req as any)._friendsActivity || [],
+        sharedLogActivity: friendsActivity,
         recentAchievements: formattedAchievements,
         suggestedLog,
         suggestedLibrary,
@@ -6501,6 +6575,22 @@ async function getIgdbToken() {
     res.json({ ok: true });
   });
 
+  app.post("/api/groups/:id/leave", authenticateToken, (req, res) => {
+    try {
+      const group = db.prepare("SELECT * FROM groups WHERE id = ?").get(req.params.id) as any;
+      if (!group) return res.status(404).json({ error: "Group not found" });
+      if (group.created_by != null && Number(group.created_by) === Number(req.user.id)) {
+        return res.status(400).json({ error: "Group creator cannot leave — delete the group instead" });
+      }
+      const isMember = db.prepare("SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?").get(req.params.id, req.user.id);
+      if (!isMember) return res.status(400).json({ error: "Not a member" });
+      db.prepare("DELETE FROM group_members WHERE group_id = ? AND user_id = ?").run(req.params.id, req.user.id);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || "Failed to leave group" });
+    }
+  });
+
   app.post("/api/groups/join", authenticateToken, (req, res) => {
     const { invite_code } = req.body;
     const group = db.prepare("SELECT * FROM groups WHERE invite_code = ?").get(invite_code);
@@ -6631,14 +6721,72 @@ async function getIgdbToken() {
     res.json(pending);
   });
 
-  // Notification count: unread messages + pending friend requests
+  // Notification count: unread messages + pending friend requests + unread session invites
   app.get("/api/notifications/count", authenticateToken, (req, res) => {
     const unread = (db.prepare("SELECT COUNT(*) as c FROM messages WHERE receiver_id = ? AND is_read = 0").get(req.user.id) as any).c || 0;
     const pending = (db.prepare(`
       SELECT COUNT(*) as c FROM friendships f1 WHERE f1.addressee_id = ?
       AND NOT EXISTS (SELECT 1 FROM friendships f2 WHERE f2.requester_id = ? AND f2.addressee_id = f1.requester_id)
     `).get(req.user.id, req.user.id) as any).c || 0;
-    res.json({ count: unread + pending, unread, pending });
+    const sessions = (db.prepare(`
+      SELECT COUNT(*) as c FROM session_invites si
+      WHERE si.group_id IN (SELECT group_id FROM group_members WHERE user_id = ?)
+      AND NOT EXISTS (SELECT 1 FROM session_invite_reads sir WHERE sir.invite_id = si.id AND sir.user_id = ?)
+    `).get(req.user.id, req.user.id) as any).c || 0;
+    const groupMsgs = (db.prepare(`
+      SELECT COUNT(*) as c FROM group_messages gm
+      WHERE gm.group_id IN (SELECT group_id FROM group_members WHERE user_id = ?)
+      AND gm.sender_id != ?
+      AND NOT EXISTS (SELECT 1 FROM group_message_reads gmr WHERE gmr.message_id = gm.id AND gmr.user_id = ?)
+    `).get(req.user.id, req.user.id, req.user.id) as any).c || 0;
+    res.json({ count: unread + pending + sessions + groupMsgs, unread, pending, sessions, groupMsgs });
+  });
+
+  // Session invites
+  app.post("/api/session-invites", authenticateToken, (req, res) => {
+    const { group_id, game_id, game_title, scheduled_at, message } = req.body;
+    if (!group_id || !game_title || !scheduled_at) {
+      return res.status(400).json({ error: "group_id, game_title, and scheduled_at are required" });
+    }
+    const isMember = db.prepare("SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?").get(group_id, req.user.id);
+    if (!isMember) return res.status(403).json({ error: "Not a group member" });
+    const info = db.prepare(
+      "INSERT INTO session_invites (group_id, game_id, game_title, scheduled_at, message, created_by) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run(group_id, game_id ?? null, game_title, scheduled_at, message || null, req.user.id);
+    // Auto-mark sender as read
+    db.prepare("INSERT OR IGNORE INTO session_invite_reads (invite_id, user_id) VALUES (?, ?)").run(info.lastInsertRowid, req.user.id);
+    res.json({ id: info.lastInsertRowid });
+  });
+
+  app.get("/api/session-invites", authenticateToken, (req, res) => {
+    const invites = db.prepare(`
+      SELECT si.*, u.username as created_by_username, u.avatar as created_by_avatar
+      FROM session_invites si
+      JOIN users u ON u.id = si.created_by
+      WHERE si.group_id IN (SELECT group_id FROM group_members WHERE user_id = ?)
+      AND NOT EXISTS (
+        SELECT 1 FROM session_invite_reads sir WHERE sir.invite_id = si.id AND sir.user_id = ?
+      )
+      ORDER BY si.created_at DESC
+    `).all(req.user.id, req.user.id);
+    res.json(invites);
+  });
+
+  app.post("/api/session-invites/:id/read", authenticateToken, (req, res) => {
+    db.prepare("INSERT OR IGNORE INTO session_invite_reads (invite_id, user_id) VALUES (?, ?)").run(req.params.id, req.user.id);
+    res.json({ success: true });
+  });
+
+  app.get("/api/session-invites/upcoming", authenticateToken, (req, res) => {
+    const invites = db.prepare(`
+      SELECT si.*, u.username as created_by_username, u.avatar as created_by_avatar
+      FROM session_invites si
+      JOIN users u ON u.id = si.created_by
+      WHERE si.group_id IN (SELECT group_id FROM group_members WHERE user_id = ?)
+      AND si.scheduled_at > datetime('now')
+      ORDER BY si.scheduled_at ASC
+    `).all(req.user.id);
+    res.json(invites);
   });
 
   // Get conversation with a specific friend
@@ -6682,6 +6830,48 @@ async function getIgdbToken() {
     res.json(updated);
   });
 
+  // Sync launcher/library titles so group ownership checks work across accounts
+  app.put("/api/user/sync-library", authenticateToken, (req, res) => {
+    const { titles } = req.body;
+    if (!Array.isArray(titles)) return res.status(400).json({ error: "titles must be an array" });
+
+    // Find titles that are newly added (not in old library)
+    const oldTitles = (db.prepare("SELECT title FROM user_library WHERE user_id = ?").all(req.user.id) as any[])
+      .map((r: any) => r.title.toLowerCase());
+    const newTitles = titles.filter((t: string) => typeof t === 'string' && t.trim());
+    const addedTitles = newTitles.filter((t: string) => !oldTitles.includes(t.trim().toLowerCase()));
+
+    db.prepare("DELETE FROM user_library WHERE user_id = ?").run(req.user.id);
+    const insert = db.prepare("INSERT OR IGNORE INTO user_library (user_id, title) VALUES (?, ?)");
+    for (const title of newTitles) {
+      insert.run(req.user.id, title.trim());
+    }
+
+    // For each newly added title, check if it's a shared game in any of the user's groups
+    // and post a system message to those group chats
+    if (addedTitles.length > 0) {
+      const user = db.prepare("SELECT id, username FROM users WHERE id = ?").get(req.user.id) as any;
+      const userGroups = db.prepare("SELECT group_id FROM group_members WHERE user_id = ?").all(req.user.id) as any[];
+      for (const { group_id } of userGroups) {
+        for (const title of addedTitles) {
+          const sharedGame = db.prepare(
+            "SELECT id FROM games WHERE group_id = ? AND list_type = 'shared' AND LOWER(title) = LOWER(?)"
+          ).get(group_id, title.trim()) as any;
+          if (sharedGame) {
+            const payload = JSON.stringify({ username: user.username, game_title: title.trim() });
+            const msgInfo = db.prepare(
+              "INSERT INTO group_messages (group_id, sender_id, content) VALUES (?, NULL, ?)"
+            ).run(group_id, `[LIBRARY_ADD]${payload}`);
+            // Mark as read for the user who triggered it
+            db.prepare("INSERT OR IGNORE INTO group_message_reads (message_id, user_id) VALUES (?, ?)").run(msgInfo.lastInsertRowid, req.user.id);
+          }
+        }
+      }
+    }
+
+    res.json({ ok: true, count: titles.length });
+  });
+
   // ── Game Comments ──
   app.get("/api/games/:id/comments", authenticateToken, (req, res) => {
     const comments = db.prepare(`
@@ -6717,6 +6907,25 @@ async function getIgdbToken() {
     res.json({ ok: true });
   });
 
+  // ── Group Library Activity ── recent [LIBRARY_ADD] messages across all user's groups
+  app.get("/api/groups/library-activity", authenticateToken, (req, res) => {
+    const msgs = db.prepare(`
+      SELECT gm.id, gm.content, gm.created_at, gr.name as group_name
+      FROM group_messages gm
+      JOIN groups gr ON gr.id = gm.group_id
+      WHERE gm.group_id IN (SELECT group_id FROM group_members WHERE user_id = ?)
+        AND gm.sender_id IS NULL
+        AND gm.content LIKE '[LIBRARY_ADD]%'
+      ORDER BY gm.created_at DESC LIMIT 20
+    `).all(req.user.id) as any[];
+    const result = msgs.map(m => {
+      let info: any = {};
+      try { info = JSON.parse(m.content.slice('[LIBRARY_ADD]'.length)); } catch {}
+      return { id: m.id, username: info.username, game_title: info.game_title, group_name: m.group_name, created_at: m.created_at };
+    });
+    res.json(result);
+  });
+
   // ── Group Ownership ── which members have each shared game in their private library
   app.get("/api/groups/:groupId/ownership", authenticateToken, (req, res) => {
     const { groupId } = req.params;
@@ -6738,12 +6947,59 @@ async function getIgdbToken() {
           UNION
           SELECT 1 FROM launcher_games
           WHERE user_id = ? AND LOWER(title) = LOWER(?)
+          UNION
+          SELECT 1 FROM user_library
+          WHERE user_id = ? AND LOWER(title) = LOWER(?)
           LIMIT 1
-        `).get(member.id, game.title, member.id, game.title);
+        `).get(member.id, game.title, member.id, game.title, member.id, game.title);
         if (has) ownership[game.id].push(member.id);
       }
     }
     res.json({ members, ownership });
+  });
+
+  // ── Group Messages ──────────────────────────────────────────────────────────
+
+  app.get("/api/groups/:groupId/messages", authenticateToken, (req, res) => {
+    const { groupId } = req.params;
+    const isMember = db.prepare("SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?").get(groupId, req.user.id);
+    if (!isMember) return res.status(403).json({ error: "Not a group member" });
+    const msgs = db.prepare(`
+      SELECT gm.id, gm.group_id, gm.sender_id, gm.content, gm.created_at,
+             u.username as sender_username, u.avatar as sender_avatar
+      FROM group_messages gm
+      LEFT JOIN users u ON u.id = gm.sender_id
+      WHERE gm.group_id = ?
+      ORDER BY gm.created_at ASC
+    `).all(groupId);
+    // Mark all as read
+    const markRead = db.prepare("INSERT OR IGNORE INTO group_message_reads (message_id, user_id) VALUES (?, ?)");
+    const markAllRead = db.transaction((messages: any[]) => {
+      for (const m of messages) markRead.run(m.id, req.user.id);
+    });
+    markAllRead(msgs);
+    res.json(msgs);
+  });
+
+  app.post("/api/groups/:groupId/messages", authenticateToken, (req, res) => {
+    const { groupId } = req.params;
+    const { content } = req.body;
+    if (!content?.trim()) return res.status(400).json({ error: "content required" });
+    const isMember = db.prepare("SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?").get(groupId, req.user.id);
+    if (!isMember) return res.status(403).json({ error: "Not a group member" });
+    const info = db.prepare(
+      "INSERT INTO group_messages (group_id, sender_id, content) VALUES (?, ?, ?)"
+    ).run(groupId, req.user.id, content.trim());
+    // Auto-mark as read for sender
+    db.prepare("INSERT OR IGNORE INTO group_message_reads (message_id, user_id) VALUES (?, ?)").run(info.lastInsertRowid, req.user.id);
+    const msg = db.prepare(`
+      SELECT gm.id, gm.group_id, gm.sender_id, gm.content, gm.created_at,
+             u.username as sender_username, u.avatar as sender_avatar
+      FROM group_messages gm
+      LEFT JOIN users u ON u.id = gm.sender_id
+      WHERE gm.id = ?
+    `).get(info.lastInsertRowid);
+    res.json(msg);
   });
 
   // Game Routes
@@ -6821,7 +7077,18 @@ async function getIgdbToken() {
         INSERT INTO games (title, artwork, banner, logo, genre, tags, description, steam_url, game_pass, allkeyshop_url, lowest_price, list_type, release_date, metacritic, steam_rating, user_id, group_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(title, artwork, banner, logo, genre, tags, description, steam_url, game_pass ? 1 : 0, allkeyshop_url, lowest_price, type, release_date, metacritic || null, steam_rating || null, userId, groupId);
-      
+
+      // Post a system message to the group chat when a shared game is added
+      if (type === 'shared' && groupId) {
+        const adder = db.prepare("SELECT username FROM users WHERE id = ?").get(req.user.id) as any;
+        const payload = JSON.stringify({ username: adder?.username, game_title: title });
+        const msgInfo = db.prepare(
+          "INSERT INTO group_messages (group_id, sender_id, content) VALUES (?, NULL, ?)"
+        ).run(groupId, `[GAME_ADDED]${payload}`);
+        // Mark as read for the user who added it
+        db.prepare("INSERT OR IGNORE INTO group_message_reads (message_id, user_id) VALUES (?, ?)").run(msgInfo.lastInsertRowid, req.user.id);
+      }
+
       res.json({ id: info.lastInsertRowid });
     } catch (error) {
       console.error("Failed to add game:", error);

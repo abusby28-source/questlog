@@ -20,8 +20,9 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || res.statusText);
+    const err = await res.json().catch(() => null);
+    const message = err?.error || res.statusText || `HTTP ${res.status}`;
+    throw new Error(message);
   }
   return res.json();
 }
@@ -34,13 +35,28 @@ const del  = <T>(path: string)               => req<T>('DELETE', path);
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
-export const remoteRegister = (username: string, password: string) =>
-  post<{ token: string; user: any }>('/api/auth/register', { username, password });
+export const remoteRegister = (username: string, password: string, email: string) =>
+  post<{ token: string; user: any }>('/api/auth/register', { username, password, email });
 
 export const remoteLogin = (username: string, password: string) =>
   post<{ token: string; user: any }>('/api/auth/login', { username, password });
 
 export const remoteMe = () => get<any>('/api/auth/me');
+
+export const remoteResetPassword = (username: string, email: string, newPassword: string) =>
+  post<{ success: boolean }>('/api/auth/reset-password', { username, email, newPassword });
+
+export const remoteCreateSessionInvite = (groupId: number, gameId: number | null, gameTitle: string, scheduledAt: string, message?: string) =>
+  post<{ id: number }>('/api/session-invites', { group_id: groupId, game_id: gameId, game_title: gameTitle, scheduled_at: scheduledAt, message });
+
+export const remoteGetSessionInvites = () =>
+  get<any[]>('/api/session-invites');
+
+export const remoteMarkSessionInviteRead = (id: number) =>
+  post<{ success: boolean }>(`/api/session-invites/${id}/read`, {});
+
+export const remoteGetUpcomingSessions = () =>
+  get<any[]>('/api/session-invites/upcoming');
 
 // ── User ──────────────────────────────────────────────────────────────────────
 
@@ -87,6 +103,7 @@ export const remoteGetGroups = () => get<any[]>('/api/groups');
 export const remoteCreateGroup = (name: string) => post<any>('/api/groups', { name });
 export const remoteJoinGroup = (invite_code: string) => post<any>('/api/groups/join', { invite_code });
 export const remoteDeleteGroup = (id: number) => del(`/api/groups/${id}`);
+export const remoteLeaveGroup = (id: number) => post<{ ok: boolean }>(`/api/groups/${id}/leave`, {});
 
 // ── Shared games ──────────────────────────────────────────────────────────────
 
@@ -128,3 +145,8 @@ export const remoteSendGroupMessage = (groupId: number, content: string) =>
 
 export const remoteGetCommonGames = (friendId: number) =>
   get<{ title: string; artwork?: string; status?: string }[]>(`/api/friends/${friendId}/common-games`);
+
+// ── Group activity ─────────────────────────────────────────────────────────────
+
+export const remoteGetLibraryActivity = () =>
+  get<{ id: number; username: string; game_title: string; group_name: string; created_at: string }[]>('/api/groups/library-activity');

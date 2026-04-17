@@ -20,7 +20,7 @@ function createWindow() {
     titleBarOverlay: {
       color: 'rgba(10, 10, 10, 0)',
       symbolColor: '#ffffff',
-      height: 80,
+      height: 36,
     }
   });
 

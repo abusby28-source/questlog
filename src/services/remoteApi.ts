@@ -103,7 +103,7 @@ export const remoteGetGroups = () => get<any[]>('/api/groups');
 export const remoteCreateGroup = (name: string) => post<any>('/api/groups', { name });
 export const remoteJoinGroup = (invite_code: string) => post<any>('/api/groups/join', { invite_code });
 export const remoteDeleteGroup = (id: number) => del(`/api/groups/${id}`);
-export const remoteLeaveGroup = (id: number) => del<{ ok: boolean }>(`/api/groups/${id}/member`);
+export const remoteLeaveGroup = (id: number) => post<{ ok: boolean }>('/api/leave-group', { group_id: id });
 
 // ── Shared games ──────────────────────────────────────────────────────────────
 

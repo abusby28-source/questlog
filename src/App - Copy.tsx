@@ -39,20 +39,14 @@ import {
   remoteGetMessages, remoteSendMessage, remoteMarkMessagesRead,
   remoteGetGroupMessages, remoteSendGroupMessage, remoteGetCommonGames, remoteGetLibraryActivity,
 } from './services/remoteApi';
-import { Game, User, Group, LauncherGame, FriendEntry, HomeData, DiscoverGame } from'./types';
+import { Game } from'./types';
 import { clsx, type ClassValue } from'clsx';
 import { twMerge } from'tailwind-merge';
-import { ALL_STEAMSPY_TAGS } from './constants';
-import { parseAchievements, isProgressGame, hltbProgress, getSteamId, jumpBackInTag, scoreJumpBackIn, buildTagline, getCountdown } from './utils/gameUtils';
-import { CachedImg } from './components/CachedImg';
-import { HorizontalScrollRow } from './components/HorizontalScrollRow';
-import { PlatformBadge } from './components/PlatformBadge';
-import { TagDropdown } from './components/TagDropdown';
-import { FriendBubble, FriendBubbles, FriendRow, MemberAvatar } from './components/FriendBubble';
-import HomePage from './pages/HomePage';
-import QuestLogPage from './pages/QuestLogPage';
-import DiscoverPage from './pages/DiscoverPage';
-import LauncherPage from './pages/LauncherPage';
+
+// Module-level image URL cache: proxy URL → resolved CDN URL.
+// Populated after an image loads so subsequent renders (tab switches) use the
+// direct CDN URL and the browser serves it from memory cache instantly.
+const resolvedImgCache = new Map<string, string>();
 
 const cn = (...inputs: ClassValue[]) => twMerge(clsx(inputs));
 
@@ -126,6 +120,22 @@ const DiscordIcon = ({ className }: { className?: string }) => (
   </svg>
 );
 
+// Resolves proxy URL to direct CDN URL after first load so tab revisits are flash-free
+const CachedImg = memo(function CachedImg({ proxyUrl, className, alt, onError }: { proxyUrl: string; className?: string; alt?: string; onError?: React.ReactEventHandler<HTMLImageElement> }) {
+  const [src, setSrc] = React.useState(() => resolvedImgCache.get(proxyUrl) || proxyUrl);
+  // Sync src when proxyUrl changes (e.g. artwork refresh)
+  useEffect(() => {
+    setSrc(resolvedImgCache.get(proxyUrl) || proxyUrl);
+  }, [proxyUrl]);
+  const handleLoad = () => {
+    if (!resolvedImgCache.has(proxyUrl)) {
+      fetch(proxyUrl + '?json=1').then(r => r.json()).then(d => {
+        if (d.url) { resolvedImgCache.set(proxyUrl, d.url); setSrc(d.url); }
+      }).catch(() => {});
+    }
+  };
+  return <img src={src} alt={alt} className={className} referrerPolicy="no-referrer" onLoad={handleLoad} onError={onError} />;
+});
 
 const ExternalGameCard = memo(function ExternalGameCard({ game, onClick, loading }: { game: DiscoverGame; onClick: () => void; loading?: boolean }) {
   // Always use the SGDB horizontal proxy endpoints for correct aspect-ratio artwork
@@ -233,6 +243,17 @@ const EpicHeroBanner = memo(function EpicHeroBanner({ games, onDetails, onOpenIn
   );
 });
 
+function getCountdown(releaseDateStr: string | undefined | null): { days: number; hours: number; minutes: number; isImminent: boolean } | null {
+  if (!releaseDateStr || releaseDateStr === 'Unknown') return null;
+  const parsed = new Date(releaseDateStr);
+  if (isNaN(parsed.getTime())) return null;
+  const diff = parsed.getTime() - Date.now();
+  if (diff <= 0) return null;
+  const days = Math.floor(diff / 86400000);
+  const hours = Math.floor((diff % 86400000) / 3600000);
+  const minutes = Math.floor((diff % 3600000) / 60000);
+  return { days, hours, minutes, isImminent: days <= 7 };
+}
 
 // Returns a vague "coming soon" label when the date can't be precisely parsed
 // but clearly indicates a future release (e.g. "Q4 2026", "TBA", "2027").
@@ -253,7 +274,163 @@ function getVagueUpcoming(releaseDateStr: string | undefined | null): string | n
   return null;
 }
 
+const HorizontalScrollRow = memo(({ children, title, icon }: { children: React.ReactNode; title: string; icon: React.ReactNode }) => {
+  const scrollRef = React.useRef<HTMLDivElement | null>(null);
+  const scroll = (direction:'left' |'right') => {
+    if (scrollRef.current) {
+      const scrollAmount = scrollRef.current.clientWidth * 0.8;
+      scrollRef.current.scrollBy({
+        left: direction ==='left' ? -scrollAmount : scrollAmount,
+        behavior:'smooth'
+      });
+    }
+  };
 
+  return (
+    <section className="relative group/row">
+      <div className="flex items-center justify-between mb-8">
+        <h2 className="text-xs font-bold uppercase tracking-widest text-white/50 flex items-center gap-2.5">
+          {icon}
+          {title}
+        </h2>
+      </div>
+
+      <div className="relative">
+        <button
+          onClick={() => scroll('left')}
+          className="absolute -left-4 top-1/2 -translate-y-1/2 z-10 p-2 rounded-full bg-black/60 border border-white/10 text-white opacity-0 group-hover/row:opacity-100 transition-opacity hover:bg-black/80"
+        >
+          <ChevronLeft size={24}/>
+        </button>
+
+        <div
+          ref={scrollRef}
+          className="flex overflow-x-auto gap-4 pt-2 -mt-2 pb-4 snap-x hide-scrollbar scroll-smooth"
+        >
+          {children}
+        </div>
+
+        <button
+          onClick={() => scroll('right')}
+          className="absolute -right-4 top-1/2 -translate-y-1/2 z-10 p-2 rounded-full bg-black/60 border border-white/10 text-white opacity-0 group-hover/row:opacity-100 transition-opacity hover:bg-black/80"
+        >
+          <ChevronRight size={24}/>
+        </button>
+
+      </div>
+    </section>
+  );
+});
+
+interface User {
+  id: number;
+  username: string;
+  steam_id?: string;
+  xbox_id?: string;
+  epic_account_id?: string;
+  ea_display_name?: string;
+  discord_id?: string;
+  avatar?: string;
+}
+
+interface Group {
+  id: number;
+  name: string;
+  invite_code: string;
+  created_by?: number;
+}
+
+interface LauncherGame {
+  id: number;
+  title: string;
+  artwork: string;
+  banner: string;
+  horizontal_grid?: string;
+  logo?: string;
+  platform:'steam' |'xbox' |'local' |'ea';
+  external_id: string;
+  launch_path: string;
+  playtime: number;
+  achievements?: string;
+  last_played: string | null;
+  created_at: string;
+  isFixingArtwork?: boolean;
+  artworkFailed?: boolean;
+  tags?: string;
+  genre?: string;
+  game_pass?: number;
+  release_date?: string;
+  installed?: boolean;
+  hidden?: boolean;
+  steam_url?: string;
+  lowest_price?: string;
+  metacritic?: number;
+  steam_rating?: string;
+  allkeyshop_url?: string;
+  description?: string;
+  hasAttemptedFix?: boolean;
+  price_dropped?: number;
+  previous_price?: string;
+  game_pass_new?: number;
+  game_pass_added_at?: string;
+  hltb_main?: number | null; // main story hours from IGDB/HLTB, -1 = no data found
+  matchedTags?: string[];
+}
+
+interface FriendEntry { id: number | string; username: string; avatar?: string; online_status: string; current_game?: string; }
+
+interface HomeData {
+  recentlyPlayed: LauncherGame[];
+  friendsOnline: { steam: FriendEntry[]; xbox: FriendEntry[]; epic: FriendEntry[]; discord: FriendEntry[]; app: FriendEntry[] };
+  discordGuildId: string | null;
+  discordGuildName: string | null;
+  discordGuildIcon: string | null;
+  discordLinked: boolean;
+  discordClientId: string | null;
+  discordGuildCached: boolean;
+  recentAchievements: { name: string, description: string, icon: string, gameTitle: string, gameArtwork: string, username: string, userAvatar?: string }[];
+  pickedForYou: (LauncherGame & { _source: 'library' | 'log'; matchedTags: string[] })[];
+  suggestions: Game[];
+  history: { date: string, minutes: number }[];
+  updates: {
+    priceDrops: Game[];
+    gamePass: Game[];
+  };
+  stats: {
+    backlogCount: number;
+    libraryCount: number;
+    playtimeHours: number;
+    weeklyPlaytimeHours: number;
+    genreStats: { genre: string, count: number }[];
+    tagStats: { tag: string, count: number }[];
+  };
+  friendsActivity?: DiscoverGame[];
+  sharedLogActivity?: { id: number; title: string; artwork?: string; genre?: string; added_by: string; user_avatar?: string; group_name: string; created_at: string }[];
+}
+
+interface DiscoverGame {
+  _external: true;
+  id: string;
+  title: string;
+  verticalArt?: string;
+  horizontalArt?: string;
+  platform?: string;
+  artwork: string;
+  banner?: string;
+  genre?: string;
+  tags?: string;
+  description?: string;
+  release_date?: string;
+  steam_rating?: string;
+  metacritic?: number;
+  logo?: string;
+  steamAppID?: string;
+  friendName?: string;
+  friendAvatar?: string;
+  lastPlayed?: string;
+  matchedLibraryId?: number | null;
+  matchedQuestlogId?: number | null;
+}
 
 interface DiscoverData {
   recentlyReleased: DiscoverGame[];
@@ -326,7 +503,390 @@ function formatLastPlayed(lastPlayed: string | null): string {
   return `${Math.floor(days / 365)}y ago`;
 }
 
+// Returns true for games where story/completion taglines make sense
+function isPartyGame(game: LauncherGame): boolean {
+  const partyGenre = /\bparty\b/i;
+  const partyTitle = /\bjackbox\b|\bpummel party\b|\bfall guys\b|\bamong us\b|\bGang Beasts\b|\bOvercooked\b|\bMoving Out\b|\bPlate Up\b|\bTools Up\b|\bHuman Fall Flat\b/i;
+  if (game.genre && partyGenre.test(game.genre)) return true;
+  if (game.tags && partyGenre.test(game.tags)) return true;
+  if (partyTitle.test(game.title)) return true;
+  return false;
+}
 
+function isProgressGame(game: LauncherGame): boolean {
+  const nonProgress = /\b(party|sports|sport|racing|massively multiplayer|mmo|pinball|board game|card game)\b/i;
+  const titleNonProgress = /\bjackbox\b|\bpummel party\b|\bfall guys\b|\bamong us\b|\bfifa\b|\bea fc\b|\bnba 2k\b|\bforza\b|\bneed for speed\b|\bwipeout\b/i;
+  if (game.genre && nonProgress.test(game.genre)) return false;
+  if (game.tags && nonProgress.test(game.tags)) return false;
+  if (titleNonProgress.test(game.title)) return false;
+  return true;
+}
+
+// Returns playtime progress 0–1 using HLTB main story hours, or null if unavailable
+function hltbProgress(game: LauncherGame): number | null {
+  if (!game.hltb_main || game.hltb_main <= 0) return null;
+  return Math.min(1, game.playtime / (game.hltb_main * 60));
+}
+
+function scoreJumpBackIn(game: LauncherGame): number {
+  let score = 0;
+  if (game.last_played) {
+    const days = (Date.now() - new Date(game.last_played).getTime()) / 86400000;
+    score += Math.max(0, 60 - days * 2); // recency: up to 60pts, decays over 30 days
+  }
+  // Achievement progress
+  if (game.achievements) {
+    try {
+      const achs = JSON.parse(game.achievements) as { unlocked: boolean }[];
+      if (achs.length > 0) {
+        const pct = achs.filter(a => a.unlocked).length / achs.length;
+        if (pct >= 0.9) score += 45;
+        else if (pct >= 0.6) score += 30 + (pct - 0.6) * 50;
+        else if (pct >= 0.3) score += pct * 20;
+      }
+    } catch { /* ignore */ }
+  }
+  // HLTB playtime progress (bonus for games close to completion)
+  const hpct = hltbProgress(game);
+  if (hpct !== null) {
+    if (hpct >= 0.8) score += 40;
+    else if (hpct >= 0.5) score += 20 + hpct * 20;
+    else if (hpct >= 0.2) score += hpct * 15;
+  }
+  return score;
+}
+
+function jumpBackInTag(game: LauncherGame): { label: string; color: string } {
+  const pick = (options: string[]) => options[game.id % options.length];
+  const days = game.last_played ? (Date.now() - new Date(game.last_played).getTime()) / 86400000 : null;
+  const progress = isProgressGame(game);
+  const hpct = hltbProgress(game);
+
+  // Achievement-based completion (always relevant regardless of game type)
+  if (game.achievements) {
+    try {
+      const achs = JSON.parse(game.achievements) as { unlocked: boolean }[];
+      if (achs.length > 0) {
+        const pct = achs.filter(a => a.unlocked).length / achs.length;
+        if (pct >= 0.9) return { label: pick(['So close to finishing', 'One final push', 'Almost there', 'The finish line is right there']), color: 'text-orange-400' };
+        if (pct >= 0.7) return { label: pick(['Close to finishing', 'The end is in sight', 'Finish what you started', 'Nearly done']), color: 'text-yellow-400' };
+        if (pct >= 0.5) return { label: pick(['Good progress — keep going', "You're on a roll", 'Halfway there', 'More than halfway done']), color: 'text-emerald-400' };
+        if (pct >= 0.3) return { label: pick(['Building momentum', 'Getting into it', 'Making your mark', 'Just warming up']), color: 'text-blue-400' };
+      }
+    } catch { /* ignore */ }
+  }
+
+  // HLTB-based playtime progress (only for story/progress games)
+  if (progress && hpct !== null) {
+    if (hpct >= 0.9) return { label: pick(['Almost at the credits', 'One final push', 'So close to finishing', 'The end is near']), color: 'text-orange-400' };
+    if (hpct >= 0.7) return { label: pick(['The end is in sight', 'Close to finishing', 'Nearly there', `${Math.round(hpct * 100)}% through`]), color: 'text-yellow-400' };
+    if (hpct >= 0.5) return { label: pick(['More than halfway done', "You're on a roll", 'Good progress', `${Math.round(hpct * 100)}% through`]), color: 'text-emerald-400' };
+    if (hpct >= 0.25) return { label: pick(['Getting into it', 'Building momentum', 'Making your mark', 'Warming up nicely']), color: 'text-blue-400' };
+  }
+
+  if (days === null) return { label: 'Unfinished business', color: 'text-white/40' };
+
+  // Non-progress games (party, sports, etc.) get neutral recency-based tags
+  if (!progress) {
+    if (days < 3)  return { label: pick(['Jump back in', 'Play again?', 'Still fresh']), color: 'text-blue-400' };
+    if (days < 14) return { label: pick(["Been a few days", 'Round two?', 'Time for another session']), color: 'text-emerald-400' };
+    if (days < 60) return { label: pick(["Ready for another round?", 'Fire it back up', "It's been a while"]), color: 'text-yellow-400' };
+    return { label: pick(['Long time no see', 'Dust it off', 'Worth another session']), color: 'text-white/40' };
+  }
+
+  // Recently started but hasn't returned (< 2h played, > 3 days away)
+  if ((game.playtime ?? 0) < 120 && days > 3) {
+    return { label: pick(["You barely scratched the surface", "Give it a proper chance", "The real game hasn't begun", "Just getting started"]), color: 'text-blue-400' };
+  }
+
+  // Started a while ago with low playtime — likely abandoned early
+  if ((game.playtime ?? 0) < 300 && days > 30) {
+    return { label: pick(["Left before it got good", "Give it another shot", "It gets better — trust us", "Pick it back up"]), color: 'text-yellow-400' };
+  }
+
+  if (days < 1)   return { label: pick(['Just picked up', 'Fresh session', 'Still in the zone', 'Right where you left it']), color: 'text-blue-400' };
+  if (days < 3)   return { label: pick(['Pick up where you left off', 'Still fresh', 'Jump right back in', 'Keep the momentum going']), color: 'text-emerald-400' };
+  if (days < 7)   return { label: pick(["Don't lose your momentum", 'Keep the streak alive', "Been a few days", 'Your save is waiting']), color: 'text-emerald-400' };
+  if (days < 14)  return { label: pick(["It's been a week", 'Left on a cliffhanger?', "Don't let it gather dust", "Time to get back at it"]), color: 'text-yellow-400' };
+  if (days < 30)  return { label: pick(['It misses you', 'Almost forgotten', 'Ready to return?', "Where did you leave off?"]), color: 'text-yellow-400' };
+  if (days < 90)  return { label: pick(['Time to revisit', 'Unfinished business', 'Your save file awaits', 'The story continues']), color: 'text-orange-400' };
+  if (days < 365) return { label: pick(['Long time no see', "Left before it got good?", 'Dust it off', 'Give it another chance']), color: 'text-red-400' };
+  return { label: pick(['A blast from the past', 'Rediscover this one', 'A forgotten adventure', 'Like playing it for the first time']), color: 'text-white/50' };
+}
+
+function parseAchievements(game: LauncherGame): { unlocked: number; total: number } | null {
+  if (!game.achievements) return null;
+  try {
+    const achs = JSON.parse(game.achievements) as { unlocked: boolean }[];
+    if (achs.length === 0) return null;
+    return { unlocked: achs.filter(a => a.unlocked).length, total: achs.length };
+  } catch { return null; }
+}
+
+const friendStatusDot: Record<string, string> = {
+  online:'bg-emerald-500',
+  in_game:'bg-blue-400',
+  away:'bg-yellow-400',
+  idle:'bg-yellow-400',
+  busy:'bg-red-500',
+  dnd:'bg-red-500',
+  offline:'bg-white/20',
+};
+const friendStatusLabel: Record<string, string> = {
+  online:'Online',
+  in_game:'In Game',
+  away:'Away',
+  idle:'Idle',
+  busy:'Do Not Disturb',
+  dnd:'Do Not Disturb',
+  offline:'Offline',
+};
+
+const PlatformBadge = memo(({ platform }: { platform?: string }) => {
+  if (!platform) return null;
+  if (platform === 'steam') return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide bg-[#1b2838] text-[#c7d5e0] border border-[#c7d5e0]/20 shrink-0">
+      <svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.187.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.497 1.01 2.452-.397.957-1.494 1.41-2.454 1.015zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.252 0-2.265-1.014-2.265-2.265z"/></svg>
+      Steam
+    </span>
+  );
+  if (platform === 'xbox') return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide bg-[#107c10]/20 text-[#52b043] border border-[#52b043]/30 shrink-0">
+      <XboxIcon className="w-2 h-2"/>
+      Xbox
+    </span>
+  );
+  if (platform === 'ea') return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide bg-[#ff4500]/20 text-[#ff6b35] border border-[#ff6b35]/30 shrink-0">
+      EA
+    </span>
+  );
+  if (platform === 'epic') return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide bg-[#0078f2]/20 text-[#4da6ff] border border-[#4da6ff]/30 shrink-0">
+      <EpicIcon className="w-2 h-2"/>
+      Epic
+    </span>
+  );
+  return null;
+});
+
+const FriendRow = memo(({ friend, showStatus = true, lastPlayedAt, platform, compact = false }: { friend: FriendEntry; showStatus?: boolean; lastPlayedAt?: string; platform?: string; compact?: boolean }) => {
+  const status = friend.online_status ||'offline';
+  const dotClass = friendStatusDot[status] ??'bg-white/20';
+  const statusLabel = friendStatusLabel[status] ?? status;
+  return (
+    <div className={cn("flex items-center group cursor-pointer", compact ? "gap-2.5" : "gap-4")}>
+      <div className="relative shrink-0">
+        <img src={friend.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${friend.username}`}
+          className={cn("object-cover", compact ? "w-7 h-7 rounded-xl" : "w-10 h-10 rounded-2xl")} alt={friend.username}/>
+        {showStatus && (
+          <div className={cn("absolute -bottom-0.5 -right-0.5 rounded-full border-2 border-[#0a0a0a]", dotClass, compact ? "w-2.5 h-2.5" : "w-3.5 h-3.5")}/>
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5">
+          <p className={cn("font-bold truncate group-hover:text-emerald-500 transition-colors", compact ? "text-xs" : "")}>{friend.username}</p>
+          <PlatformBadge platform={platform}/>
+        </div>
+        {showStatus && (
+          <p className={cn("truncate", compact ? "text-[10px] text-white/40" : "text-xs text-white/40")}>
+            {friend.current_game
+              ? <span className="text-blue-300">{friend.current_game}</span>
+              : statusLabel}
+          </p>
+        )}
+        {lastPlayedAt && (
+          <p className="text-[10px] text-white/30 font-mono">Last played {lastPlayedAt}</p>
+        )}
+      </div>
+    </div>
+  );
+});
+
+// Compact avatar bubble used in Friends Online — circle avatar + status dot + name
+const FriendBubble = memo(({ friend }: { friend: FriendEntry }) => {
+  const [expanded, setExpanded] = React.useState(false);
+  const status = friend.online_status || 'offline';
+  const dotClass = friendStatusDot[status] ?? 'bg-white/20';
+  const statusLabel = friendStatusLabel[status] ?? 'Offline';
+  const statusColor = status === 'online' ? 'text-emerald-400'
+    : status === 'in_game' ? 'text-blue-400'
+    : (status === 'idle') ? 'text-yellow-400'
+    : (status === 'dnd' || status === 'busy') ? 'text-red-400'
+    : 'text-white/30';
+
+  return (
+    <div className="relative group/bubble">
+      {/* Hover name tooltip — only when collapsed */}
+      {!expanded && (
+        <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-black/80 backdrop-blur-sm text-white text-[9px] font-medium px-2 py-0.5 rounded-full whitespace-nowrap opacity-0 group-hover/bubble:opacity-100 transition-opacity pointer-events-none z-20">
+          {friend.current_game ? `${friend.username} · ${friend.current_game}` : friend.username}
+        </div>
+      )}
+      <motion.div
+        layout
+        onClick={() => setExpanded(e => !e)}
+        className={cn(
+          "flex items-center gap-2 cursor-pointer",
+          expanded ? "bg-white/5 ring-1 ring-white/10 pr-3 rounded-full" : "rounded-full"
+        )}
+        style={{ height: 36 }}
+        transition={{ layout: { duration: 0.2, ease: 'easeInOut' } }}
+      >
+        <div className="relative shrink-0">
+          <img
+            src={friend.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${friend.username}`}
+            className="w-9 h-9 rounded-full object-cover ring-1 ring-white/10 group-hover/bubble:ring-white/30 transition-all"
+            alt={friend.username}
+          />
+          <div className={cn("absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-[1.5px] border-[#0a0a0a]", dotClass)}/>
+          {friend.current_game && (
+            <div className="absolute -top-0.5 -left-0.5 w-2.5 h-2.5 rounded-full bg-blue-400 border-[1.5px] border-[#0a0a0a]"/>
+          )}
+        </div>
+        <AnimatePresence>
+          {expanded && (
+            <motion.div
+              initial={{ opacity: 0, width: 0 }}
+              animate={{ opacity: 1, width: 'auto' }}
+              exit={{ opacity: 0, width: 0 }}
+              transition={{ duration: 0.18, ease: 'easeInOut' }}
+              className="flex flex-col overflow-hidden whitespace-nowrap pr-1"
+            >
+              <span className="text-[11px] font-semibold text-white leading-tight">{friend.username}</span>
+              <span className={cn("text-[9px] font-medium leading-tight", statusColor)}>
+                {friend.current_game || statusLabel}
+              </span>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
+    </div>
+  );
+});
+
+// Row of avatar bubbles with overflow chip
+const FriendBubbles = ({ friends, max = 7 }: { friends: FriendEntry[]; max?: number }) => {
+  const shown = friends.slice(0, max);
+  const overflow = friends.length - max;
+  return (
+    <div className="flex flex-wrap gap-2 items-center">
+      {shown.map(f => <FriendBubble key={f.id} friend={f}/>)}
+      {overflow > 0 && (
+        <div className="w-9 h-9 rounded-full bg-white/5 ring-1 ring-white/10 flex items-center justify-center" title={`+${overflow} more`}>
+          <span className="text-[10px] font-bold text-white/40">+{overflow}</span>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Reusable member avatar — shows initials on broken/missing image
+const AVATAR_COLORS = ['#7c3aed','#2563eb','#059669','#d97706','#dc2626','#db2777','#0891b2','#9333ea'];
+function avatarColor(username: string) { return AVATAR_COLORS[username.charCodeAt(0) % AVATAR_COLORS.length]; }
+
+const MemberAvatar = React.memo(function MemberAvatar({ username, avatar, size = 'md', owns, onClick, className }: {
+  username: string; avatar?: string | null; size?: 'xs' | 'sm' | 'md' | 'lg'; owns?: boolean; onClick?: (e: React.MouseEvent) => void; className?: string;
+}) {
+  const [failed, setFailed] = React.useState(false);
+  const dim = { xs: 'w-5 h-5 text-[9px]', sm: 'w-6 h-6 text-[10px]', md: 'w-8 h-8 text-xs', lg: 'w-10 h-10 text-sm' }[size];
+  const border = owns === true ? 'border-2 border-emerald-400' : owns === false ? 'border-2 border-white/20' : 'border-2 border-[#141414]';
+  const muted = owns === false ? 'grayscale opacity-50' : '';
+  return (
+    <div
+      onClick={onClick}
+      title={username}
+      className={cn('rounded-full flex items-center justify-center font-bold overflow-hidden shrink-0', dim, border, muted, onClick && 'cursor-pointer hover:scale-110 active:scale-95 transition-transform', className)}
+      style={failed || !avatar ? { backgroundColor: avatarColor(username) } : undefined}
+    >
+      {!failed && avatar
+        ? <img src={avatar} alt={username} className="w-full h-full object-cover" onError={() => setFailed(true)} />
+        : <span className="text-white leading-none select-none">{(username[0] || '?').toUpperCase()}</span>
+      }
+    </div>
+  );
+});
+
+const TagDropdown = ({
+  availableTags,
+  selectedTags,
+  setSelectedTags,
+}: {
+  availableTags: string[];
+  selectedTags: string[];
+  setSelectedTags: React.Dispatch<React.SetStateAction<string[]>>;
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = React.useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <div className="relative" ref={dropdownRef}>
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 text-xs font-bold uppercase tracking-widest hover:bg-white/10 transition-all"
+>
+        <Tag size={14}/>
+        Tags {selectedTags.length> 0 && `(${selectedTags.length})`}
+        <ChevronDown
+          size={14}
+          className={cn(
+'transition-transform',
+            isOpen &&'rotate-180',
+          )}
+/>
+      </button>
+      
+      {isOpen && (
+        <div className="absolute top-full mt-2 right-0 w-64 max-h-64 overflow-y-auto bg-[#1a1a1a] border border-white/10 rounded-xl shadow-2xl z-50 p-2 custom-scrollbar">
+          {availableTags.length === 0 ? (
+            <div className="p-4 text-center text-xs text-white/40 italic">No tags available</div>
+          ) : (
+            <>
+              {selectedTags.length> 0 && (
+                <button
+                  onClick={() => setSelectedTags([])}
+                  className="w-full text-left px-3 py-2 text-xs font-bold text-red-400 hover:bg-white/5 rounded-lg mb-2 transition-colors"
+>
+                  Clear Filters
+                </button>
+              )}
+              {availableTags.map(tag => (
+                <label
+                  key={tag}
+                  className="flex items-center gap-3 px-3 py-2 hover:bg-white/5 rounded-lg cursor-pointer transition-colors"
+>
+                  <input
+                    type="checkbox"
+                    checked={selectedTags.includes(tag)}
+                    onChange={() =>
+                      setSelectedTags(prev =>
+                        prev.includes(tag)
+                          ? prev.filter(t => t !== tag)
+                          : [...prev, tag],
+                      )
+                    }
+                    className="w-4 h-4 rounded border-white/20 bg-black/50 text-emerald-500 focus:ring-emerald-500/50 focus:ring-offset-0"
+/>
+                  <span className="text-xs font-mono uppercase tracking-widest text-white/80">{tag}</span>
+                </label>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const SuggestionThumb: React.FC<{ steamAppID?: string; title: string; fallbackThumb?: string; size?: string }> = memo(({ steamAppID, title, fallbackThumb, size = 'w-10 h-10' }) => {
   const [iconUrl, setIconUrl] = React.useState<string | null>(null);
@@ -354,6 +914,206 @@ const SuggestionThumb: React.FC<{ steamAppID?: string; title: string; fallbackTh
   );
 });
 
+function buildTagline(
+  tags: { tag: string; count: number }[],
+  topGame?: { title: string; playtime: number } | null,
+  recentGameTitle?: string | null,
+  libraryCount = 0
+): string {
+  // Deterministic daily rotation — changes each day, consistent all day
+  const dayIndex = Math.floor(Date.now() / 86400000);
+  const pick = <T,>(arr: T[]): T => arr[dayIndex % arr.length];
+
+  const topTagNames = tags.slice(0, 5).map(t => t.tag.toLowerCase());
+  const has = (t: string) => topTagNames.some(n => n.includes(t));
+  const topHours = topGame ? Math.round(topGame.playtime / 60) : 0;
+  const clip = (s: string, n = 24) => s.length > n ? s.slice(0, n - 1) + '…' : s;
+  const topTitle = topGame ? clip(topGame.title) : null;
+  const recentTitle = recentGameTitle ? clip(recentGameTitle) : null;
+
+  if (topHours > 500 && topTitle) return pick([
+    `${topHours} hours in ${topTitle}. The game has a family now.`,
+    `${topTitle} isn't just a game at this point. It's a lifestyle.`,
+    `${topHours}h in ${topTitle}. Someone should check on them.`,
+  ]);
+  if (topHours > 300 && topTitle) return pick([
+    `${topHours}h in ${topTitle}. A cry for help disguised as a hobby.`,
+    `${topTitle}: ${topHours} hours deep. No signs of stopping.`,
+    `Doctors hate this one weird trick: ${topTitle} for ${topHours} hours.`,
+  ]);
+  if (topHours > 150 && topTitle) return pick([
+    `Currently in a very committed, very unhealthy relationship with ${topTitle}.`,
+    `${topTitle} said 'just one more hour' ${topHours} times. They agreed every time.`,
+    `${topHours}h in ${topTitle}. The couch has a permanent imprint now.`,
+  ]);
+  if (topHours > 80 && topTitle && has('singleplayer')) return pick([
+    `Told themselves ${topTitle} was a 'quick one'. That was ${topHours} hours ago.`,
+    `${topTitle}: started as a weekend thing. ${topHours}h later, here we are.`,
+    `'Nearly done' with ${topTitle}. Has been nearly done for ${topHours} hours.`,
+  ]);
+
+  if (has('souls') || has('souls-like')) return pick([
+    recentTitle ? `${recentTitle} said 'you died' and they said 'yeah, I know, again please'.` : "Sees a 'You Died' screen and thinks 'nice, free tutorial'.",
+    "Loses to the same boss 30 times and calls it a skill issue. Fixed it. New skill issue.",
+    recentTitle ? `${recentTitle} is destroying them. They are having the time of their life.` : "Enjoys pain. Has the platinum trophies to prove it.",
+    "Tells people games are too easy. Plays only Souls games. Coincidence.",
+  ]);
+  if (has('roguelike') || has('roguelite')) return pick([
+    topTitle ? `${topHours}h of dying in ${topTitle} and going back for more. Undefeated. Technically.` : "Died 400 times and called it a strategic learning curve. Sure.",
+    "'Just one more run' has been the plan for six hours.",
+    topTitle ? `${topTitle}: same dungeon, different disaster, every single time.` : "Knows every way to die. Working on finding more.",
+    "The run is never truly over. It just pauses.",
+  ]);
+  if (has('horror') && has('singleplayer')) return pick([
+    recentTitle ? `Playing ${recentTitle} alone at 2am. Totally fine. Sleeping with the light on, but fine.` : "Plays horror games alone in the dark. Sends many distress signals. Denies all of them.",
+    "Asked for a scary game. Got one. Regretting everything. Still playing.",
+    recentTitle ? `${recentTitle} is genuinely terrifying. They're on hour four.` : "The jump scare got them. They will not be admitting that.",
+  ]);
+  if (has('horror')) return pick([
+    "Picks the creepy game every time. Wonders why they can't sleep.",
+    "There were clearly better options. Chose the horror game. Classic.",
+    "Sleeps fine apparently. Somehow. Concerningly.",
+  ]);
+  if (has('stealth')) return pick([
+    recentTitle ? `One guard spotted them in ${recentTitle}. Reloaded the save. Twice.` : "Reloads if a single NPC glances in their direction. Perfectionist. Unwell.",
+    "Ghost run only. Lethal run only. No in between.",
+    recentTitle ? `Spent 45 minutes waiting for a patrol in ${recentTitle}. Worth it.` : "The alarm went off once in 2019. Still haunted.",
+    "Knocks out every guard then feels bad about it. Every time.",
+  ]);
+  if (has('open world') && has('rpg')) return pick([
+    topTitle ? `${topHours}h in ${topTitle}. Still on the first island. No regrets.` : "The main quest? Never heard of her. Too busy doing literally everything else.",
+    recentTitle ? `${recentTitle} has a main story apparently. Yet to investigate.` : "Completed every side quest. Forgot what the main quest was.",
+    "Fast travelled once. Felt guilty about it for days.",
+    topTitle ? `${topTitle}: map fully explored, main quest at 8%. Perfection.` : "The world is the point. The story is a suggestion.",
+  ]);
+  if (has('open world')) return pick([
+    recentTitle ? `Somewhere in ${recentTitle} right now, picking flowers instead of saving the world.` : "Fast travel exists. They walk everywhere anyway. It's about the journey.",
+    "Saw a mountain. Had to climb it. Forgot the mission.",
+    recentTitle ? `The map in ${recentTitle} is basically fully explored. The story: untouched.` : "Objective marker? That's a suggestion.",
+  ]);
+  if (has('fps') && has('competitive')) return pick([
+    "Blames the ping. Blames the teammates. Blames the mouse. Never themselves.",
+    "Top fragged. Carries never acknowledged. Throws always someone else's fault.",
+    "Has a 'real rank' that is definitely higher than their current rank.",
+    "'One more game' to fix the rank. Rank remains. Games continue.",
+  ]);
+  if (has('fps') || has('shooter')) return pick([
+    recentTitle ? `Skipped every cutscene in ${recentTitle}. Zero clue what's happening. Thriving.` : "Shoots first, reads the briefing never, asks questions eventually.",
+    "The story is loading. They are already shooting.",
+    recentTitle ? `Finished ${recentTitle}. Could not tell you a single plot point.` : "Tutorials skipped. Lore ignored. Vibes: immaculate.",
+  ]);
+  if (has('strategy') && has('turn-based')) return pick([
+    topTitle ? `One turn in ${topTitle} takes 40 minutes. They call it 'being thorough'.` : "Pauses a turn-based game to think harder. The game was already paused.",
+    "'It's turn-based, I can take my time.' Takes all of the time.",
+    "Optimises everything. Wins. Immediately starts optimising the win.",
+    recentTitle ? `${recentTitle}: the plan was perfect. The execution was also perfect. Somehow still nervous.` : "Has a spreadsheet open alongside the game. It helps. Allegedly.",
+  ]);
+  if (has('strategy') || has('rts')) return pick([
+    "Opens the game with a plan. The plan lasts approximately four minutes.",
+    "Built too many barracks. Ran out of money. Blames the AI.",
+    "'I had it under control' — someone who did not have it under control.",
+  ]);
+  if (has('co-op')) return pick([
+    "Will not play anything that can't be done with a mate. Non-negotiable.",
+    "Solo mode exists. Has never opened it. Never will.",
+    recentTitle ? `${recentTitle} but make it a two-person chaos simulator.` : "Better with friends. Refuses to verify this with data.",
+  ]);
+  if (has('multiplayer') && has('competitive')) return pick([
+    "Has strong opinions about ranked. Mostly screamed into a headset.",
+    "Competitive mode only. Casual mode is for cowards apparently.",
+    "Current rank does not reflect true skill. The true skill is much higher. Trust.",
+  ]);
+  if (has('multiplayer')) return pick([
+    "The single-player campaign is still in the wrapper. Genuinely fine with that.",
+    "Solo queue king/queen. The teammates are the variable. Always.",
+    "Has never read the patch notes. Somehow always knows what changed.",
+  ]);
+  if (has('survival')) return pick([
+    topTitle ? `${topHours}h in ${topTitle} and hasn't touched the main quest. The base is immaculate though.` : "Built a six-floor base before the first night. Overachiever. Absolutely.",
+    "Day one priority: base. Day two priority: bigger base. Story: optional.",
+    recentTitle ? `${recentTitle}: survived. Thrived. Built a castle. Still nervous.` : "The crafting system has been fully mastered. The plot has not been started.",
+  ]);
+  if (has('simulation')) return pick([
+    topTitle ? `Has ${topHours}h in ${topTitle}. Also has a life, allegedly.` : "Managing a fictional farm/city/airline better than any real responsibility.",
+    "The crops will not water themselves. Real life can wait.",
+    recentTitle ? `${recentTitle} is basically a second job at this point. Unpaid. Preferred.` : "Optimised the supply chain in a game. Cannot find matching socks in real life.",
+  ]);
+  if (has('puzzle')) return pick([
+    "Googles the solution after 30 seconds, then claims they 'almost had it'.",
+    "Stared at it for an hour. The answer was obvious. This information is private.",
+    "Galaxy-brained the easy puzzle. Missed the obvious one. Balanced.",
+    recentTitle ? `${recentTitle} broke their brain. They are thriving.` : "The puzzle was solved eventually. No further questions.",
+  ]);
+  if (has('platformer')) return pick([
+    recentTitle ? `'One more attempt' in ${recentTitle} has been going for three hours.` : "One more life. Just one more. One. More.",
+    "The hitbox was wrong. It is always the hitbox.",
+    "Collected every single thing in a level that did not require it. Zero regrets.",
+    recentTitle ? `${recentTitle}: fell off the same ledge 11 times. Notes have been taken.` : "Precision platforming: the art of falling with confidence.",
+  ]);
+  if (has('indie')) return pick([
+    `${libraryCount} games in the library. At least half are from a sale they forgot about.`,
+    "Bought 40 indie games on sale. Played six. Outstanding value.",
+    "The hidden gem hunter. Has found several. Still searching.",
+    recentTitle ? `${recentTitle} has 200 reviews on Steam. All of them are correct.` : "Supports indie devs. Spiritually. By buying and not playing.",
+  ]);
+  if (has('singleplayer') && has('rpg')) return pick([
+    recentTitle ? `Currently in ${recentTitle}, 60 hours deep, on a side quest about a farmer's missing goat.` : "Named their character something embarrassing. Now 80 hours in. No way back.",
+    topTitle ? `The lore of ${topTitle} is fully understood. The plot is irrelevant.` : "Every NPC has a name, a backstory, and has been spoken to twice.",
+    recentTitle ? `${recentTitle}: sidequests done, map cleared, main story at 3%.` : "Completed every optional dungeon. The story can wait indefinitely.",
+    "Reads every item description. Knows the whole lore. Unhinged. Respected.",
+  ]);
+  if (has('singleplayer') && has('action')) return pick([
+    "Plays on the hardest difficulty. Tells no one. Suffers privately. Loves it.",
+    recentTitle ? `${recentTitle} on max difficulty. For fun apparently.` : "Normal mode? An insult. Easy mode? Unthinkable.",
+    "No story skips. No fast travel. Full immersion. Full suffering.",
+  ]);
+  if (has('rpg')) return pick([
+    topTitle ? `${topHours}h in ${topTitle} and the main story is 12% complete. The vibes are immaculate.` : "Every side quest is the main quest, actually.",
+    "Spent two hours in the character creator. Worth every minute.",
+    recentTitle ? `${recentTitle}: the side content alone is a 60-hour game. Doing all of it.` : "The inventory is organised. The story is not. Priorities.",
+    "Built the perfect character build. Restarted to try a different one.",
+  ]);
+  if (has('action')) return pick([
+    recentTitle ? `Skipped every cutscene in ${recentTitle}. Blissfully confused. Having a great time.` : "No cutscene survives. No objective is read. No notes are taken.",
+    "The tutorial said to dodge. They did not dodge. Learned eventually.",
+    recentTitle ? `${recentTitle}: vibes-based playthrough. No map checked. Zero regrets.` : "Plays by feel. The feel is often wrong. Still confident.",
+  ]);
+  if (has('adventure')) return pick([
+    "Clicks on every single thing in every single room. You know who you are.",
+    recentTitle ? `Talked to every NPC in ${recentTitle}. Twice. Just in case.` : "Read every piece of in-game lore. Voluntarily.",
+    "Explores left first. Always left. Don't ask why.",
+  ]);
+  if (has('sci-fi') || has('science fiction')) return pick([
+    "Fully convinced they'd survive the apocalypse. The prep work helps.",
+    recentTitle ? `${recentTitle} has explained exactly why the science checks out.` : "Has opinions on fictional faster-than-light travel. Strong ones.",
+    "The spaceship controls make complete sense to them. To them.",
+  ]);
+  if (has('fantasy')) return pick([
+    "Has strong lore opinions about a world that doesn't exist. Valid.",
+    recentTitle ? `Could explain the entire history of ${recentTitle}'s world. Unprompted.` : "Knows the magic system better than their own tax bracket.",
+    "Named their sword. Knows its backstory. It's complicated.",
+  ]);
+  if (has('sports') || has('racing')) return pick([
+    "Manual transmission only. Will bring it up unprompted.",
+    "Simulation settings on. Assists off. Suffers authentically.",
+    recentTitle ? `Lost in ${recentTitle}. Immediately queued up again. This is fine.` : "Career mode fully committed. Real sports: a distant memory.",
+  ]);
+  if (topTitle && topHours > 20) return pick([
+    `${topHours}h in ${topTitle} and counting. Send snacks.`,
+    `${topTitle}: ${topHours} hours logged. The end is not yet in sight.`,
+    `Currently ${topHours} hours into ${topTitle}. This is going great.`,
+  ]);
+  if (tags.length > 0) return pick([
+    `Deep into ${tags[0].tag} games and absolutely no one is surprised.`,
+    `A ${tags[0].tag} enthusiast. Unashamed. Undefeated.`,
+    `${tags[0].tag} is not just a genre. It's a personality trait.`,
+  ]);
+  return pick([
+    "A library this big needs its own postcode.",
+    "The backlog grows. The hours shrink. The spirit remains.",
+    "Collecting games is a hobby. Playing them is optional.",
+  ]);
+}
 
 function buildBacklogTagline(
   tags: { tag: string; count: number }[],
@@ -795,6 +1555,16 @@ export default function App() {
 
   const [artworkRefreshKey, setArtworkRefreshKey] = useState(0);
   const [isRefreshingArtwork, setIsRefreshingArtwork] = useState(false);
+
+  const getSteamId = (game: Game | LauncherGame) => {
+    if ('platform' in game && game.platform ==='steam') {
+      return game.external_id;
+    } else if ('steam_url' in game && game.steam_url) {
+      const match = game.steam_url.match(/\/app\/(\d+)/);
+      if (match) return match[1];
+    }
+    return null;
+  };
 
   const refreshHomepageArtwork = async () => {
     if (!homeData || isRefreshingArtwork) return;
@@ -3379,174 +4149,1468 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto px-6 pt-6 pb-12">
         {currentTab ==='home' ? (
-          <HomePage
-            homeData={homeData}
-            launcherGames={launcherGames}
-            user={user}
-            appFriends={appFriends}
-            showProgressModal={showProgressModal}
-            setShowProgressModal={setShowProgressModal}
-            showStatsDetail={showStatsDetail}
-            setShowStatsDetail={setShowStatsDetail}
-            revealTotalHours={revealTotalHours}
-            setRevealTotalHours={setRevealTotalHours}
-            playtimeChartTab={playtimeChartTab}
-            setPlaytimeChartTab={setPlaytimeChartTab}
-            artworkRefreshKey={artworkRefreshKey}
-            nowTick={nowTick}
-            upcomingSessions={upcomingSessions}
-            showHiddenGames={showHiddenGames}
-            companionProgress={companionProgress}
-            setCompanionProgress={setCompanionProgress}
-            friendsLibraryStats={friendsLibraryStats}
-            showRecentAchievements={showRecentAchievements}
-            setShowRecentAchievements={setShowRecentAchievements}
-            games={games}
-            setSelectedGame={setSelectedGame}
-            fetchLauncherGameDetails={fetchLauncherGameDetails}
-            setCurrentTab={setCurrentTab}
-            setSessionModal={setSessionModal}
-            showCardTooltip={showCardTooltip}
-            hideCardTooltip={hideCardTooltip}
-            handleFriendActivityClick={handleFriendActivityClick}
-            fetchQuestlogFriends={fetchQuestlogFriends}
-            handleSyncXbox={handleSyncXbox}
-            handleSyncEpic={handleSyncEpic}
-            handleLinkProfile={handleLinkProfile}
-            handleOpenDiscordGuildPicker={handleOpenDiscordGuildPicker}
-            setShowSteamLinkModal={setShowSteamLinkModal}
-            fetchAppFriends={fetchAppFriends}
-            fetchPendingRequests={fetchPendingRequests}
-            fetchNotificationCount={fetchNotificationCount}
-            fetchFriendActivity={fetchFriendActivity}
-            setFriendsModalTab={setFriendsModalTab}
-            setShowQuestlogFriends={setShowQuestlogFriends}
-            remoteGetFriendProgress={remoteGetFriendProgress}
-          />
+          <div className="space-y-8">
+            <section className="relative h-[400px] rounded-[40px] overflow-hidden group">
+              <img
+                src={
+                  homeData?.recentlyPlayed?.[0]
+                    ? getBannerUrl(homeData.recentlyPlayed[0])
+                    :'https://picsum.photos/seed/gaming/1920/1080'
+                }
+                className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-102"
+                alt="Hero"
+                referrerPolicy="no-referrer"
+/>
+              <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a0a] via-[#0a0a0a]/40 to-transparent"/>
+              <div className="absolute bottom-12 left-12 max-w-2xl">
+                <motion.div
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="space-y-4"
+>
+                  <div className="flex items-center gap-3">
+                    <span className="px-3 py-1 bg-emerald-500 text-black text-[10px] font-bold uppercase tracking-widest rounded-full">
+                      Featured
+                    </span>
+                    <span className="text-white/60 text-sm font-medium">Continue your journey</span>
+                  </div>
+                  <h1 className="text-6xl font-black tracking-tighter text-white">
+                    Welcome back, <span className="text-emerald-500">{user?.username}</span>
+                  </h1>
+                  <div className="flex items-center gap-4 pt-4">
+                    <button
+                      onClick={() => {
+                        if (homeData?.recentlyPlayed?.[0]) {
+                          setSelectedGame(homeData.recentlyPlayed[0] as any);
+                          fetchLauncherGameDetails(homeData.recentlyPlayed[0].id);
+                        }
+                      }}
+                      className="px-8 py-4 bg-white text-black rounded-2xl font-bold hover:bg-emerald-500 hover:text-black transition-all flex items-center gap-3 group/btn"
+>
+                      <Play size={20} fill="currentColor"/>
+                      Resume Last Game
+                    </button>
+                    <button
+                      onClick={() => setCurrentTab('launcher')}
+                      className="px-8 py-4 bg-white/10 text-white rounded-2xl font-bold hover:bg-white/20 transition-all border border-white/10"
+>
+                      View Library
+                    </button>
+                  </div>
+                </motion.div>
+              </div>
+            </section>
+
+
+            <div ref={homeGridRef} className="grid grid-cols-1 lg:grid-cols-12 gap-10">
+              <div className="lg:col-span-8 space-y-10">
+                <HorizontalScrollRow title="Jump Back In" icon={<Clock size={12} className="text-emerald-500/60"/>}>
+                  {[...(homeData?.recentlyPlayed ?? [])]
+                    .filter(g => g.id !== homeData?.recentlyPlayed?.[0]?.id && !isPartyGame(g))
+                    .sort((a, b) => scoreJumpBackIn(b) - scoreJumpBackIn(a))
+                    .map((game) => {
+                      const ach = parseAchievements(game);
+                      const achPct = ach ? ach.unlocked / ach.total : null;
+                      const hpct = isProgressGame(game) ? hltbProgress(game) : null;
+                      const pct = achPct ?? hpct ?? null;
+                      const barType = achPct !== null ? 'ach' : 'hltb';
+                      const tag = jumpBackInTag(game);
+                      return (
+                        <motion.div key={game.id} whileHover={{ y: -5 }}
+                          onClick={() => { setSelectedGame(game as any); fetchLauncherGameDetails(game.id); }}
+                          onMouseEnter={(e) => showCardTooltip(game.title, e.clientX, e.clientY)}
+                          onMouseLeave={hideCardTooltip}
+                          className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
+                        >
+                            <CachedImg proxyUrl={getSteamHorizontalArtwork(game, artworkRefreshKey)} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.03]" alt={game.title}
+                              onError={(e) => { const t = e.target as HTMLImageElement; if (!t.src.includes(getBannerUrl(game))) t.src = getBannerUrl(game); }}
+                            />
+                            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200" style={{ background: 'radial-gradient(ellipse at top left, rgba(0,0,0,0.55) 0%, transparent 65%)' }}/>
+                            <div className="absolute top-2.5 left-3 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                              <p className={cn('text-[8px] font-bold uppercase tracking-widest mb-1', tag.color)}>{tag.label}</p>
+                              {pct !== null && (
+                                <div className="flex items-center gap-1.5">
+                                  <div className="relative h-[3px] w-14 rounded-full overflow-hidden bg-white/15">
+                                    <div className="absolute inset-y-0 left-0 rounded-full"
+                                      style={{
+                                        width: `${pct * 100}%`,
+                                        background: barType === 'ach'  ? 'linear-gradient(90deg, #10b981, #06b6d4)'
+                                                 : barType === 'hltb' ? 'linear-gradient(90deg, #6366f1, #8b5cf6)'
+                                                 :                       'linear-gradient(90deg, #f59e0b, #f97316)',
+                                        boxShadow: barType === 'ach'  ? '0 0 5px rgba(16,185,129,0.6)'
+                                                 : barType === 'hltb' ? '0 0 5px rgba(99,102,241,0.6)'
+                                                 :                       '0 0 5px rgba(245,158,11,0.5)',
+                                      }}
+                                    />
+                                    {[0.25, 0.5, 0.75].map(mark => (
+                                      <div key={mark} className="absolute inset-y-0 w-px bg-black/40" style={{ left: `${mark * 100}%` }}/>
+                                    ))}
+                                  </div>
+                                  <span className="text-[8px] font-bold" style={{ color: barType === 'hltb' ? `hsl(${250 + pct * 30}, 70%, 70%)` : `hsl(${140 * pct}, 80%, 60%)` }}>
+                                    {Math.round(pct * 100)}%
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                        </motion.div>
+                      );
+                    })}
+                </HorizontalScrollRow>
+
+                <HorizontalScrollRow title="Picked for You" icon={<Sparkles size={12} className="text-amber-400/60"/>}>
+                  {homeData?.pickedForYou?.map((game) => {
+                    const tags = (game.matchedTags ?? []).slice(0, 3);
+                    const isLibrary = game._source === 'library';
+                    return (
+                      <motion.div key={`${game._source}-${game.id}`} whileHover={{ y: -5 }}
+                        onClick={() => {
+                          setSelectedGame(game as any);
+                          if (isLibrary) fetchLauncherGameDetails(game.id);
+                          else fetchQuestlogFriends(game as any);
+                        }}
+                        onMouseEnter={(e) => showCardTooltip(game.title, e.clientX, e.clientY)}
+                        onMouseLeave={hideCardTooltip}
+                        className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
+                      >
+                        <CachedImg proxyUrl={getSteamHorizontalArtwork(game, artworkRefreshKey)} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.03]" alt={game.title}
+                          onError={(e) => { const t = e.target as HTMLImageElement; if (!t.src.includes(getBannerUrl(game))) t.src = getBannerUrl(game); }}
+                        />
+                        <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200" style={{ background: 'radial-gradient(ellipse at top left, rgba(0,0,0,0.6) 0%, transparent 65%)' }}/>
+                        <div className="absolute top-2.5 left-3 flex flex-wrap gap-1 items-center opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                          <span className={cn('flex items-center justify-center w-5 h-5 rounded-full',
+                            isLibrary ? 'bg-blue-500 text-white' : 'bg-purple-500 text-white'
+                          )}>
+                            {isLibrary ? <Library size={10}/> : <Gamepad2 size={10}/>}
+                          </span>
+                          {tags.map((tag, i) => (
+                            <span key={tag} className={cn('text-[7px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full',
+                              i === 0 ? 'bg-emerald-500/25 text-emerald-300' :
+                              i === 1 ? 'bg-amber-500/25 text-amber-300' :
+                                        'bg-rose-500/25 text-rose-300'
+                            )}>{tag}</span>
+                          ))}
+                        </div>
+                      </motion.div>
+                    );
+                  })}
+                </HorizontalScrollRow>
+
+                {/* Friends Activity */}
+                {homeData?.friendsActivity && homeData.friendsActivity.length > 0 && (() => {
+                  const ncA = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+                  const allOnline = [
+                    ...(homeData.friendsOnline?.steam ?? []),
+                    ...(homeData.friendsOnline?.xbox ?? []),
+                    ...(homeData.friendsOnline?.epic ?? []),
+                    ...(homeData.friendsOnline?.discord ?? []),
+                    ...(homeData.friendsOnline?.app ?? []),
+                  ];
+                  const liveGames = new Set(allOnline.filter(f => f.current_game).map(f => ncA(f.current_game!)));
+                  type ActivityGroup = {
+                    game: DiscoverGame;
+                    friends: { name: string; avatar: string; playedAt?: string }[];
+                    isLive: boolean;
+                    matchedLibraryId: number | null;
+                    matchedQuestlogId: number | null;
+                  };
+                  const groups = new Map<string, ActivityGroup>();
+                  for (const item of homeData.friendsActivity) {
+                    const key = ncA(item.title);
+                    if (!groups.has(key)) {
+                      groups.set(key, {
+                        game: item,
+                        friends: [],
+                        isLive: liveGames.has(key),
+                        matchedLibraryId: item.matchedLibraryId ?? null,
+                        matchedQuestlogId: item.matchedQuestlogId ?? null,
+                      });
+                    }
+                    const grp = groups.get(key)!;
+                    if (item.friendName) {
+                      grp.friends.push({ name: item.friendName, avatar: item.friendAvatar || '', playedAt: item.lastPlayed });
+                    }
+                  }
+                  const sorted = [...groups.values()].sort((a, b) => {
+                    if (a.isLive !== b.isLive) return a.isLive ? -1 : 1;
+                    return b.friends.length - a.friends.length;
+                  });
+                  function fmtTime(ts: string | undefined): string | null {
+                    if (!ts) return null;
+                    const ms = new Date(ts).getTime();
+                    if (isNaN(ms) || ms <= 0) return null;
+                    const days = Math.floor((Date.now() - ms) / 86400000);
+                    if (days === 0) return 'Today';
+                    if (days === 1) return 'Yesterday';
+                    if (days < 7) return `${days}d ago`;
+                    if (days < 30) return `${Math.floor(days / 7)}w ago`;
+                    return `${Math.floor(days / 30)}mo ago`;
+                  }
+                  return (
+                    <div ref={friendsActivityRef}>
+                      <HorizontalScrollRow title="Friends Activity" icon={<Users size={12} className="text-blue-400/60"/>}>
+                        {sorted.map((group) => {
+                          const { game, friends, isLive, matchedLibraryId, matchedQuestlogId } = group;
+                          const shown = friends.slice(0, 3);
+                          const extra = friends.length - 3;
+                          const steamAppID = game.steamAppID;
+                          const proxyUrl = steamAppID
+                            ? `/api/steamgriddb/horizontal/${steamAppID}`
+                            : `/api/steamgriddb/horizontal-by-name/${encodeURIComponent(game.title)}`;
+                          return (
+                            <motion.div key={game.id} whileHover={{ y: -5 }}
+                              onClick={() => handleFriendActivityClick(game)}
+                              onMouseEnter={(e) => showCardTooltip(game.title, e.clientX, e.clientY)}
+                              onMouseLeave={hideCardTooltip}
+                              className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
+                            >
+                                <CachedImg proxyUrl={proxyUrl} alt={game.title}
+                                  className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+                                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                />
+                                <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200" style={{ background: 'radial-gradient(ellipse at top left, rgba(0,0,0,0.65) 0%, transparent 65%)' }}/>
+                                <div className="absolute top-2.5 left-3 flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                                  <span className={cn('flex items-center justify-center w-5 h-5 rounded-full shrink-0',
+                                    matchedLibraryId ? 'bg-blue-500 text-white' :
+                                    matchedQuestlogId ? 'bg-purple-500 text-white' :
+                                    'bg-white/20 text-white/60'
+                                  )}>
+                                    {matchedLibraryId ? <Library size={10}/> :
+                                     matchedQuestlogId ? <Gamepad2 size={10}/> :
+                                     <Sparkles size={10}/>}
+                                  </span>
+                                  {friends.slice(0, 2).map((f) => (
+                                    <div key={f.name} className="flex items-center gap-1">
+                                      <div className="w-5 h-5 rounded-full border border-black/60 overflow-hidden shrink-0">
+                                        <img src={f.avatar} alt={f.name} className="w-full h-full object-cover" referrerPolicy="no-referrer"
+                                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                        />
+                                      </div>
+                                      <span className="text-[8px] font-semibold text-white/80 leading-none whitespace-nowrap">{f.name}</span>
+                                    </div>
+                                  ))}
+                                  {friends.length > 2 && (
+                                    <span className="text-[7px] text-white/40 leading-none">+{friends.length - 2}</span>
+                                  )}
+                                  {isLive && (
+                                    <span className="flex items-center gap-1 bg-emerald-500/20 text-emerald-400 text-[7px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block"/>
+                                      Live
+                                    </span>
+                                  )}
+                                </div>
+                            </motion.div>
+                          );
+                        })}
+                      </HorizontalScrollRow>
+                    </div>
+                  );
+                })()}
+
+              </div>
+
+              <div ref={homeSidebarRef} className="lg:col-span-4 flex flex-col gap-10">
+                <section>
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-white/50 mb-5 flex items-center gap-2.5">
+                    <Users size={12} className="text-blue-500"/>
+                    Friends Online
+                  </h3>
+
+                  <div className="space-y-6">
+                    {/* Steam */}
+                    <div className="flex items-center gap-4 min-h-[36px]">
+                      <SteamIcon className="w-6 h-6 text-white/20 shrink-0"/>
+                      {user?.steam_id ? (
+                        (() => { const online = (homeData?.friendsOnline?.steam ?? []).filter(f => f.online_status === 'online'); return online.length > 0
+                          ? <FriendBubbles friends={online}/>
+                          : <p className="text-[10px] text-white/20 italic">No one online</p>; })()
+                      ) : (
+                        <button onClick={() => setShowSteamLinkModal(true)} className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-white/20 hover:text-white/50 transition-colors cursor-pointer">
+                          <Plus size={9}/> Connect
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Xbox */}
+                    <div className="flex items-center gap-4 min-h-[36px]">
+                      <XboxIcon className="w-6 h-6 text-white/20 shrink-0"/>
+                      {user?.xbox_id ? (
+                        (() => { const online = (homeData?.friendsOnline?.xbox ?? []).filter(f => f.online_status === 'online'); return online.length > 0
+                          ? <FriendBubbles friends={online}/>
+                          : <p className="text-[10px] text-white/20 italic">No one online</p>; })()
+                      ) : (
+                        <button onClick={handleSyncXbox} className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-white/20 hover:text-white/50 transition-colors cursor-pointer">
+                          <Plus size={9}/> Connect
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Epic */}
+                    <div className="flex items-center gap-4 min-h-[36px]">
+                      <EpicIcon className="w-6 h-6 text-white/20 shrink-0"/>
+                      {user?.epic_account_id ? (
+                        (homeData?.friendsOnline?.epic ?? []).length > 0
+                          ? <FriendBubbles friends={homeData.friendsOnline.epic}/>
+                          : <p className="text-[10px] text-white/20 italic">No one online</p>
+                      ) : (
+                        <button onClick={handleSyncEpic} className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-white/20 hover:text-white/50 transition-colors cursor-pointer">
+                          <Plus size={9}/> Connect
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Discord */}
+                    <div className="flex items-center gap-4 min-h-[36px]">
+                      <DiscordIcon className="w-6 h-6 text-white/20 shrink-0"/>
+                      {!user?.discord_id ? (
+                        <button onClick={() => handleLinkProfile('discord')} className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-white/20 hover:text-white/50 transition-colors cursor-pointer">
+                          <Plus size={9}/> Connect
+                        </button>
+                      ) : !homeData?.discordGuildId ? (
+                        <button onClick={handleOpenDiscordGuildPicker} className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-white/20 hover:text-white/50 transition-colors cursor-pointer">
+                          <Plus size={9}/> Pick a server
+                        </button>
+                      ) : !homeData?.discordGuildCached ? (
+                        <button onClick={handleOpenDiscordGuildPicker} className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-[#5865F2]/50 hover:text-[#5865F2] transition-colors cursor-pointer">
+                          <Plus size={9}/> Invite bot for presence
+                        </button>
+                      ) : (homeData.friendsOnline?.discord ?? []).length > 0 ? (
+                        <div className="flex-1 min-w-0">
+                          <FriendBubbles friends={homeData.friendsOnline.discord} max={8}/>
+                        </div>
+                      ) : (
+                        <p className="text-[10px] text-white/20 italic">No one online</p>
+                      )}
+                      {user?.discord_id && homeData?.discordGuildId && (
+                        <button onClick={handleOpenDiscordGuildPicker} className="ml-auto text-[9px] font-bold uppercase tracking-widest text-white/15 hover:text-white/40 transition-colors cursor-pointer shrink-0">
+                          Change
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </section>
+
+                <section className="flex-1 flex flex-col">
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-white/50 mb-6 flex items-center gap-2.5">
+                    <Activity size={12} className="text-emerald-500"/>
+                    Quick Stats
+                  </h3>
+                  <div className="flex-1 flex flex-col gap-4 pb-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <button onClick={() => setShowStatsDetail('library')}
+                        className="p-6 bg-blue-500/10 border border-blue-500/20 rounded-3xl text-left hover:bg-blue-500/20 transition-all group">
+                        <Library className="text-blue-500 mb-4 group-hover:scale-[1.03] transition-transform"/>
+                        <div className="text-2xl font-black">{homeData?.stats?.libraryCount}</div>
+                        <div className="text-xs font-bold text-blue-500/60 uppercase tracking-widest">Library</div>
+                      </button>
+                      <button onClick={() => { setShowStatsDetail('playtime'); setRevealTotalHours(false); }}
+                        className="p-6 bg-emerald-500/10 border border-emerald-500/20 rounded-3xl text-left hover:bg-emerald-500/20 transition-all group">
+                        <Clock className="text-emerald-500 mb-3 group-hover:scale-[1.03] transition-transform"/>
+                        <div className="text-2xl font-black">{homeData?.stats?.weeklyPlaytimeHours ?? 0}h</div>
+                        <div className="text-xs font-bold text-emerald-500/60 uppercase tracking-widest">This Week</div>
+                      </button>
+                      <button onClick={() => setShowStatsDetail('backlog')}
+                        className="p-6 bg-purple-500/10 border border-purple-500/20 rounded-3xl text-left hover:bg-purple-500/20 transition-all group">
+                        <Gamepad2 className="text-purple-500 mb-4 group-hover:scale-[1.03] transition-transform"/>
+                        <div className="text-2xl font-black">{homeData?.stats?.backlogCount}</div>
+                        <div className="text-xs font-bold text-purple-500/60 uppercase tracking-widest">Backlog</div>
+                      </button>
+                      <button onClick={() => setShowRecentAchievements(true)}
+                        className="p-6 bg-orange-500/10 border border-orange-500/20 rounded-3xl text-left hover:bg-orange-500/20 transition-all group">
+                        <Trophy className="text-orange-500 mb-4 group-hover:scale-[1.03] transition-transform"/>
+                        <div className="text-2xl font-black">{homeData?.recentAchievements?.length}</div>
+                        <div className="text-xs font-bold text-orange-500/60 uppercase tracking-widest">Achievements</div>
+                      </button>
+                    </div>
+                    <button onClick={() => {
+                      setShowProgressModal(true);
+                      appFriends.forEach(async f => {
+                        if (companionProgress[f.id]) return;
+                        try { setCompanionProgress(p => ({ ...p, [f.id]: [] })); const data = await remoteGetFriendProgress(f.id); setCompanionProgress(p => ({ ...p, [f.id]: data })); } catch {}
+                      });
+                    }}
+                      className="flex-1 w-full px-6 pt-4 pb-6 bg-teal-500/10 border border-teal-500/20 rounded-3xl text-left hover:bg-teal-500/20 transition-all group flex flex-col justify-start">
+                      {/* Header: icon + label top-left, count top-right */}
+                      <div className="flex items-start justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <TrendingUp className="text-teal-500 group-hover:scale-[1.03] transition-transform"/>
+                          <div className="text-xs font-bold text-teal-500/60 uppercase tracking-widest">In Progress</div>
+                        </div>
+                        <div className="text-2xl font-black">{(homeData?.recentlyPlayed ?? []).filter(g => (g.playtime ?? 0) > 0).length}</div>
+                      </div>
+                      {/* Games list — flex-1 so it fills the remaining pill space */}
+                      <div className="flex-1 flex flex-col justify-between">
+                        {(homeData?.recentlyPlayed ?? []).filter(g => (g.playtime ?? 0) > 0).slice(0, 3).map(game => {
+                          const ach = parseAchievements(game);
+                          const achPct = ach ? ach.unlocked / ach.total : null;
+                          const hpct = isProgressGame(game) ? hltbProgress(game) : null;
+                          const pct = achPct ?? hpct ?? null;
+                          const barType = achPct !== null ? 'ach' : 'hltb';
+                          const barGrad = barType === 'ach' ? 'linear-gradient(90deg,#10b981,#06b6d4)' : 'linear-gradient(90deg,#6366f1,#a855f7)';
+                          const pctColor = barType === 'hltb' ? '#a78bfa' : `hsl(${140 * (pct ?? 0)},80%,60%)`;
+                          const steamId = game.platform === 'steam' ? game.external_id : undefined;
+                          return (
+                            <div key={game.id} className="flex items-center gap-2">
+                              <SuggestionThumb steamAppID={steamId} title={game.title} fallbackThumb={game.artwork} size="w-6 h-6"/>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between mb-1">
+                                  <p className="text-[10px] font-semibold truncate text-white/80">{game.title}</p>
+                                  {pct !== null && <span className="text-[10px] font-black ml-1.5 shrink-0 tabular-nums" style={{ color: pctColor }}>{Math.round(pct * 100)}%</span>}
+                                </div>
+                                <div className="relative h-1.5 rounded-full bg-white/10 overflow-hidden">
+                                  {pct !== null && <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct * 100}%`, background: barGrad }}/>}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </button>
+                  </div>
+                </section>
+
+              </div>
+            </div>
+
+            <InProgressModal
+              showProgressModal={showProgressModal}
+              setShowProgressModal={setShowProgressModal}
+              launcherGames={launcherGames}
+              user={user}
+              appFriends={appFriends}
+              companionProgress={companionProgress}
+              parseAchievements={parseAchievements}
+              isProgressGame={isProgressGame}
+              hltbProgress={hltbProgress}
+              setSelectedGame={setSelectedGame}
+              fetchLauncherGameDetails={fetchLauncherGameDetails}
+            />
+
+
+            <PlaytimeStatsModal
+              showStatsDetail={showStatsDetail}
+              setShowStatsDetail={setShowStatsDetail}
+              homeData={homeData}
+              launcherGames={launcherGames}
+              games={games}
+              user={user}
+              appFriends={appFriends}
+              friendsLibraryStats={friendsLibraryStats}
+              revealTotalHours={revealTotalHours}
+              setRevealTotalHours={setRevealTotalHours}
+              buildTagline={buildTagline}
+              buildBacklogTagline={buildBacklogTagline}
+              getCountdown={getCountdown}
+              getVagueUpcoming={getVagueUpcoming}
+              getSteamId={getSteamId}
+              setSelectedGame={setSelectedGame}
+              fetchAppFriends={fetchAppFriends}
+              fetchPendingRequests={fetchPendingRequests}
+              fetchNotificationCount={fetchNotificationCount}
+              fetchFriendActivity={fetchFriendActivity}
+              setFriendsModalTab={setFriendsModalTab}
+              setShowQuestlogFriends={setShowQuestlogFriends}
+            />
+          </div>
         ) : currentTab ==='questlog' ? (
-          <QuestLogPage
-            games={games}
-            displayedGames={displayedGames}
-            user={user}
-            groups={groups}
-            activeGroupId={activeGroupId}
-            setActiveGroupId={setActiveGroupId}
-            activeList={activeList}
-            setActiveList={setActiveList}
-            availableTags={Array.from(new Set(games.flatMap(g => g.tags ? g.tags.split(',').map((t) => t.trim()) : [])))}
-            selectedTags={selectedTags}
-            setSelectedTags={setSelectedTags}
-            questLogSearch={questLogSearch}
-            setQuestLogSearch={setQuestLogSearch}
-            isRefreshing={isRefreshing}
-            isRefreshingPrices={isRefreshingPrices}
-            confirmClear={confirmClear}
-            setConfirmClear={setConfirmClear}
-            groupActionsOpen={groupActionsOpen}
-            setGroupActionsOpen={setGroupActionsOpen}
-            groupOwnership={groupOwnership}
-            libraryMatchMap={libraryMatchMap}
-            launcherGames={launcherGames}
-            hideLibraryGames={hideLibraryGames}
-            setHideLibraryGames={setHideLibraryGames}
-            hideUnreleasedPrivate={hideUnreleasedPrivate}
-            setHideUnreleasedPrivate={setHideUnreleasedPrivate}
-            hideUnreleasedShared={hideUnreleasedShared}
-            setHideUnreleasedShared={setHideUnreleasedShared}
-            addToList={addToList}
-            setAddToList={setAddToList}
-            similarSuggestions={similarSuggestions}
-            isLoadingSimilar={isLoadingSimilar}
-            epicFreeMap={epicFreeMap}
-            setIsAdding={setIsAdding}
-            setSelectedGame={setSelectedGame}
-            setSessionModal={setSessionModal}
-            setSessionDateTime={setSessionDateTime}
-            setSessionMessage={setSessionMessage}
-            setGameComments={setGameComments}
-            setGames={setGames}
-            setIsCreatingGroup={setIsCreatingGroup}
-            setIsJoiningGroup={setIsJoiningGroup}
-            setGroupInput={setGroupInput}
-            fetchGames={fetchGames}
-            fetchGameComments={fetchGameComments}
-            fetchQuestlogFriends={fetchQuestlogFriends}
-            fetchSimilarSuggestionsData={fetchSimilarSuggestionsData}
-            handleRefreshPrices={handleRefreshPrices}
-            clearAllGames={clearAllGames}
-            handleDeleteGroup={handleDeleteGroup}
-            handleLeaveGroup={handleLeaveGroup}
-            openMemberProfile={openMemberProfile}
-            openInBrowser={openInBrowser}
-            openXboxApp={openXboxApp}
-            remoteDismissPriceAlert={remoteDismissPriceAlert}
-            remoteDismissGamePassAlert={remoteDismissGamePassAlert}
-            fixArtwork={fixArtwork}
-            token={token}
-            setCurrentTab={setCurrentTab}
-          />
+          <div className="space-y-8">
+            {/* Hero header — mirrors Launcher's "Your Library" section */}
+            <div className="flex flex-col md:flex-row md:items-end justify-between gap-8 border-b border-white/10 pb-8">
+              <div className="space-y-4 flex-1">
+                <p className="text-xs font-mono uppercase tracking-[0.2em] opacity-50">Game Backlog</p>
+                <h2 className="text-6xl font-light tracking-tight">Your <span className="italic font-serif">Questlog</span></h2>
+                <div className="flex flex-col gap-4 pt-4">
+                  {/* Row 1: search + refresh — mirrors launcher's search + sync/refresh row */}
+                  <div className="flex flex-wrap items-center gap-4">
+                    <div className="relative flex-1 min-w-[300px] max-w-md">
+                      <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-white/30" size={18}/>
+                      <input
+                        type="text"
+                        placeholder="Search backlog..."
+                        value={questLogSearch}
+                        onChange={(e) => setQuestLogSearch(e.target.value)}
+                        className="w-full bg-white/5 border border-white/10 rounded-full py-3 pl-12 pr-6 focus:outline-none focus:border-white/30 transition-all text-sm"
+                      />
+                    </div>
+                    <button onClick={async () => { await fetchGames(); handleRefreshPrices(); }} disabled={isRefreshing || isRefreshingPrices} className="p-3 rounded-full bg-white/5 border border-white/10 text-white/50 hover:text-white hover:bg-white/10 transition-all disabled:opacity-50" title="Refresh List">
+                      <RefreshCw size={18} className={isRefreshing || isRefreshingPrices ? 'animate-spin text-emerald-500' : ''}/>
+                    </button>
+                  </div>
+                  {/* Row 2: Private/Shared pill (expands with group controls when Shared) + tags */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="flex items-center gap-1 bg-white/5 p-1 rounded-full border border-white/10">
+                      <button onClick={() => { setActiveList('private'); setConfirmClear(false); setGroupActionsOpen(false); }}
+                        className={cn("px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer", activeList ==='private' ?"bg-white text-[#141414]" :"text-white/50 hover:text-white")}
+                      >Private</button>
+                      <button onClick={() => { setActiveList('shared'); setConfirmClear(false); }}
+                        className={cn("px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer", activeList ==='shared' ?"bg-white text-[#141414]" :"text-white/50 hover:text-white")}
+                      >Shared</button>
+                      {activeList === 'shared' && (
+                        <>
+                          <div className="w-px h-4 bg-white/15 mx-0.5"/>
+                          {/* Group selector — always visible */}
+                          {groups.length > 0 ? (
+                            <select value={activeGroupId ?? ''} onChange={(e) => setActiveGroupId(e.target.value ? Number(e.target.value) : null)}
+                              className="bg-transparent text-white text-[10px] font-bold uppercase tracking-widest focus:outline-none cursor-pointer px-2 py-1.5 max-w-[180px]">
+                              {groups.map(g => (<option key={g.id} value={g.id} className="bg-[#1a1a1a]">{g.name}</option>))}
+                            </select>
+                          ) : (
+                            <span className="text-[10px] text-white/30 italic px-2">No groups</span>
+                          )}
+                          {/* Expand/collapse arrow */}
+                          <button
+                            onClick={() => setGroupActionsOpen(o => !o)}
+                            className="p-1.5 rounded-full text-white/30 hover:text-white hover:bg-white/10 transition-all"
+                            title="Group actions"
+                          >
+                            <ChevronRight size={12} className={cn("transition-transform duration-200", groupActionsOpen && "rotate-180")}/>
+                          </button>
+                          {/* Expanded actions */}
+                          {groupActionsOpen && (() => {
+                            const activeGroup = groups.find(g => g.id === activeGroupId);
+                            return (
+                              <>
+                                <div className="w-px h-4 bg-white/15 mx-0.5"/>
+                                {activeGroup && (
+                                  <>
+                                    <span className="text-[9px] uppercase font-bold opacity-30 tracking-widest pl-1">Code</span>
+                                    <span className="font-mono font-bold text-[10px] text-white/70 pr-1">{activeGroup.invite_code}</span>
+                                    <div className="w-px h-4 bg-white/15 mx-0.5"/>
+                                  </>
+                                )}
+                                <button onClick={() => { setGroupInput(''); setIsCreatingGroup(true); }} className="px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer text-white/50 hover:text-white hover:bg-white/10">Create</button>
+                                <button onClick={() => { setGroupInput(''); setIsJoiningGroup(true); }} className="px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer text-white/50 hover:text-white hover:bg-white/10">Join</button>
+                                {activeGroup && user?.id != null && (
+                                  <>
+                                    <div className="w-px h-4 bg-white/15 mx-0.5"/>
+                                    {Number(activeGroup.created_by) === Number(user.id) ? (
+                                      <button
+                                        onClick={() => { if (window.confirm(`Delete group "${activeGroup.name}"? This cannot be undone.`)) handleDeleteGroup(activeGroup.id); }}
+                                        className="px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer text-red-500/60 hover:text-red-400 hover:bg-red-500/10"
+                                      >Delete</button>
+                                    ) : (
+                                      <button
+                                        onClick={() => handleLeaveGroup(activeGroup.id, activeGroup.name)}
+                                        className="px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer text-orange-500/60 hover:text-orange-400 hover:bg-orange-500/10"
+                                      >Leave</button>
+                                    )}
+                                  </>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </>
+                      )}
+                    </div>
+                    {availableTags.length> 0 && (
+                      <TagDropdown availableTags={availableTags} selectedTags={selectedTags} setSelectedTags={setSelectedTags}/>
+                    )}
+                  </div>
+                </div>
+              </div>
+              {/* Right column: Add Game + Refresh + Clear — mirrors launcher's Add Quest / Clear Library */}
+              <div className="flex flex-col items-end gap-3">
+                {/* Member avatars — shared view only */}
+                {activeList === 'shared' && groupOwnership && groupOwnership.members.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[9px] font-bold uppercase tracking-widest text-white/30">Members</span>
+                    <div className="flex -space-x-2">
+                      {groupOwnership.members.map(m => (
+                        <MemberAvatar key={m.id} username={m.username} avatar={m.avatar} size="sm"
+                          onClick={(e) => { e.stopPropagation(); openMemberProfile(m); }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="flex flex-wrap gap-4 items-center">
+                <button
+                  onClick={() => {
+                    setAddToList(activeList);
+                    if (activeList ==='shared' && !activeGroupId) { alert('Please create or join a group first'); return; }
+                    setIsAdding(true);
+                  }}
+                  className="flex items-center gap-2 px-6 py-3 rounded-full bg-emerald-600 text-white hover:bg-emerald-500 transition-all text-sm font-bold uppercase tracking-widest shadow-lg shadow-emerald-900/20"
+                >
+                  <Plus size={18}/> Add Game
+                </button>
+                {games.filter(g => g.list_type === activeList).length> 0 && (
+                  <div className="relative flex items-center">
+                    {confirmClear ? (
+                      <div className="flex items-center gap-2 bg-red-100 p-1.5 rounded-full border border-red-900/50 animate-in fade-in slide-in-from-right-4 shadow-sm">
+                        <AlertTriangle size={16} className="text-red-600 ml-2"/>
+                        <span className="text-sm font-bold text-red-400 mr-1">Clear all?</span>
+                        <button onClick={() => setConfirmClear(false)} className="px-4 py-2 bg-[#1a1a1a] text-red-400 rounded-full text-xs font-bold hover:bg-red-900/20 transition-colors cursor-pointer">Cancel</button>
+                        <button onClick={clearAllGames} className="px-4 py-2 bg-red-600 text-white rounded-full text-xs font-bold hover:bg-red-700 transition-colors cursor-pointer">Yes, Clear</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => setConfirmClear(true)} className="flex items-center gap-2 px-5 py-2.5 rounded-full bg-red-900/20 text-red-600 hover:bg-red-900/40 hover:text-red-400 transition-colors font-bold text-sm cursor-pointer border border-red-900/30">
+                        <Trash2 size={18}/>
+                        <span className="hidden sm:inline">Clear {activeList ==='shared' ?'Shared' :'Private'}</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+                </div>
+              </div>
+            </div>
+
+
+            {/* Section title row */}
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-bold uppercase tracking-widest text-white/50 flex items-center gap-2.5">
+                <BookOpen size={12} className="text-emerald-500/60"/>
+                {activeList ==='private' ?'My Backlog' :'Shared Backlog'}
+                <span className="font-normal normal-case tracking-normal text-white/30">{displayedGames.length} games</span>
+              </h3>
+              <div className="flex items-center gap-2">
+                {(() => {
+                  const hideUnreleased = activeList === 'private' ? hideUnreleasedPrivate : hideUnreleasedShared;
+                  const setHideUnreleased = activeList === 'private' ? setHideUnreleasedPrivate : setHideUnreleasedShared;
+                  return (
+                    <button
+                      onClick={() => setHideUnreleased(h => !h)}
+                      className={cn("flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold transition-colors border cursor-pointer",
+                        hideUnreleased
+                          ? "bg-indigo-600 text-white border-indigo-500"
+                          : "bg-white/5 text-white/40 border-white/10 hover:border-indigo-500/40 hover:text-white/60")}
+                    >
+                      <Calendar size={12}/>
+                      Hide Unreleased
+                    </button>
+                  );
+                })()}
+                {launcherGames.length > 0 && (
+                  <button
+                    onClick={() => setHideLibraryGames(h => !h)}
+                    className={cn("flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold transition-colors border cursor-pointer",
+                      hideLibraryGames
+                        ? "bg-emerald-600 text-white border-emerald-500"
+                        : "bg-white/5 text-white/40 border-white/10 hover:border-emerald-500/40 hover:text-white/60")}
+                  >
+                    <BookOpen size={12}/>
+                    Hide in Library
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {displayedGames.length === 0 ? (
+              <div className="py-32 flex flex-col items-center justify-center border-2 border-dashed border-white/10 rounded-3xl">
+                <div className="opacity-20 mb-4"><Gamepad2 size={64}/></div>
+                <p className="text-white/40 font-medium">
+                  {activeList ==='shared' && !activeGroupId
+                    ?"Create or join a group to start a shared backlog!"
+                    : `Your ${activeList ==='shared' ?'shared' :'private'} backlog is empty. Start adding games!`}
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6">
+                {displayedGames.map((game) => (
+                  <motion.div layoutId={`game-container-${game.id}`} key={game.id} onClick={() => { setSelectedGame(game as any); fetchQuestlogFriends(game as any); if (game.list_type === 'shared') { setGameComments([]); fetchGameComments(game.id); } if (game.price_dropped) { if (game.list_type === 'shared') { remoteDismissPriceAlert(game.id); } else { fetch(`/api/games/${game.id}/dismiss-price-alert`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` } }); } setGames(prev => prev.map(g => g.id === game.id ? { ...g, price_dropped: 0 } : g)); } if ((game as any).game_pass_new) { if (game.list_type === 'shared') { remoteDismissGamePassAlert(game.id); } else { fetch(`/api/games/${game.id}/dismiss-game-pass-alert`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` } }); } setGames(prev => prev.map(g => g.id === game.id ? { ...g, game_pass_new: 0 } : g)); } }}
+                    className="group cursor-pointer" whileHover={{ y: -8, scale: 1.02 }}
+>
+                    {(() => {
+                      const owners = groupOwnership?.ownership?.[game.id] ?? [];
+                      const members = groupOwnership?.members ?? [];
+                      const allOwn = members.length > 0 && owners.length === members.length;
+                      const someOwn = !allOwn && owners.length > 0;
+                      const inLibrary = activeList === 'private' && libraryMatchMap.has(game.id);
+                      const hidePrice = libraryMatchMap.has(game.id) || (activeList === 'shared' && user != null && owners.includes(user.id));
+                      return (
+                    <div className={cn("relative aspect-[2/3] overflow-hidden rounded-2xl bg-white/5 transition-all",
+                        allOwn || inLibrary ? "border-2 border-emerald-400" : "ring-1 ring-white/10")}
+                      style={allOwn || inLibrary ? { boxShadow: '0 0 0 2px rgba(52,211,153,0.6), 0 0 20px 6px rgba(16,185,129,0.45), 0 0 40px 12px rgba(16,185,129,0.2)' } : undefined}
+                    >
+                      {game.isFixingArtwork ? (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#1a1a1a]">
+                          <Loader2 className="animate-spin text-emerald-600 mb-2" size={32}/>
+                          <span className="text-xs font-mono uppercase opacity-50">Fixing Artwork...</span>
+                        </div>
+                      ) : game.artworkFailed ? (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#1a1a1a] group-hover:bg-[#222] transition-colors">
+                          <Gamepad2 className="opacity-20 mb-2" size={48}/>
+                          <span className="text-xs font-mono uppercase opacity-50 text-center px-4 mb-2">{game.title}</span>
+                          <span className="text-[10px] bg-white/10 px-2 py-1 rounded text-white/70 font-bold">Click to add artwork</span>
+                        </div>
+                      ) : (
+                        <img src={game.artwork} alt={game.title} loading="lazy" className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.03]" referrerPolicy="no-referrer" onError={(e) => {
+                            const target = e.target as HTMLImageElement;
+                            if (target.src.includes('library_capsule_2x.jpg')) {
+                              target.src = target.src.replace('library_capsule_2x.jpg','library_capsule.jpg');
+                            } else if (target.src.includes('library_capsule.jpg')) {
+                              target.src = target.src.replace('library_capsule.jpg','library_600x900.jpg');
+                            } else {
+                              fixArtwork(game);
+                            }
+                          }}
+/>
+                      )}
+                      {/* Price drop badge */}
+                      {game.price_dropped === 1 && (
+                        <div className="absolute top-2 left-2 z-10 flex items-center gap-1 bg-amber-500/90 text-black text-[9px] font-black px-2 py-1 rounded-full backdrop-blur-sm pointer-events-none">
+                          <TrendingDown size={10}/>
+                          Price Drop
+                        </div>
+                      )}
+                      {/* Game Pass new badge */}
+                      {(game as any).game_pass_new === 1 && (
+                        <div className={cn("absolute z-10 flex items-center gap-1 text-[9px] font-black px-2 py-1 rounded-full backdrop-blur-sm pointer-events-none", game.price_dropped === 1 ? "top-8 left-2" : "top-2 left-2")} style={{ background: 'rgba(16,185,129,0.9)', color: '#fff' }}>
+                          <XboxIcon className="w-3 h-3"/>
+                          Now on Game Pass
+                        </div>
+                      )}
+                      {/* Member ownership avatars / Schedule session button */}
+                      {members.length > 0 && (
+                        allOwn ? (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setSessionModal({ game, groupId: activeGroupId! }); setSessionDateTime(''); setSessionMessage(''); }}
+                            className="absolute top-2 left-2 z-20 flex items-center gap-1 bg-emerald-500/90 hover:bg-emerald-400 active:scale-95 text-white text-[9px] font-black px-2 py-1 rounded-full backdrop-blur-sm transition-all opacity-0 group-hover:opacity-100"
+                            title="Everyone has this game — schedule a session!"
+                          >
+                            <Calendar size={10}/>
+                            Play Together
+                          </button>
+                        ) : (
+                          <div className="absolute top-2 left-2 flex -space-x-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                            {members.map(m => (
+                              <MemberAvatar key={m.id} username={m.username} avatar={m.avatar} size="sm"
+                                owns={owners.includes(m.id)}
+                                onClick={(e) => { e.stopPropagation(); openMemberProfile(m); }}
+                              />
+                            ))}
+                          </div>
+                        )
+                      )}
+                      {/* Countdown / Coming Soon overlay for unreleased games */}
+                      {(() => {
+                        const cd = getCountdown(game.release_date);
+                        const vague = !cd ? getVagueUpcoming(game.release_date) : null;
+                        if (!cd && !vague) return null;
+
+                        if (vague) {
+                          // Vague date: small badge top-right always, full overlay only on hover
+                          return (
+                            <>
+                              {/* Persistent dim */}
+                              <div className="absolute inset-0 z-[5] pointer-events-none bg-black/40"/>
+                              {/* Persistent small badge */}
+                              <div className="absolute top-2 right-2 z-20 flex items-center gap-1 bg-black/70 backdrop-blur-sm border border-white/10 px-1.5 py-0.5 rounded-full pointer-events-none group-hover:opacity-0 transition-opacity duration-200">
+                                <Calendar size={8} className="text-indigo-400 shrink-0"/>
+                                <span className="text-[8px] font-mono text-white/50 uppercase tracking-wide">Unreleased</span>
+                              </div>
+                              {/* Hover overlay */}
+                              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-300"
+                                style={{ background: 'linear-gradient(to bottom, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.85) 100%)' }}>
+                                <Calendar size={18} className="text-indigo-400 mb-1"/>
+                                <p className="text-[8px] font-mono uppercase tracking-widest text-white/50 mb-1.5">Coming Soon</p>
+                                <p className="text-sm font-black text-white/70 px-4 text-center">{vague}</p>
+                                <p className="text-[9px] text-white/30 font-medium mt-2 px-3 text-center">{game.release_date}</p>
+                              </div>
+                            </>
+                          );
+                        }
+
+                        // Precise countdown: always-visible overlay
+                        return (
+                          <>
+                          <div className="absolute inset-0 z-[5] pointer-events-none bg-black/40"/>
+                          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center pointer-events-none"
+                            style={{ background: 'linear-gradient(to bottom, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.85) 100%)' }}>
+                            <Calendar size={18} className={cd!.isImminent ? "text-amber-400 mb-1" : "text-indigo-400 mb-1"}/>
+                            <p className="text-[8px] font-mono uppercase tracking-widest text-white/50 mb-1.5">Coming Soon</p>
+                            {cd!.days > 0 ? (
+                              <div className="flex items-end gap-2">
+                                <div className="text-center">
+                                  <p className={cn("text-2xl font-black leading-none", cd!.isImminent ? "text-amber-400" : "text-white")}>{cd!.days}</p>
+                                  <p className="text-[8px] font-mono uppercase text-white/40 mt-0.5">days</p>
+                                </div>
+                                {cd!.days < 100 && (
+                                  <>
+                                    <div className="text-center">
+                                      <p className="text-lg font-black leading-none text-white/60">{String(cd!.hours).padStart(2,'0')}</p>
+                                      <p className="text-[8px] font-mono uppercase text-white/30 mt-0.5">hrs</p>
+                                    </div>
+                                    <div className="text-center">
+                                      <p className="text-lg font-black leading-none text-white/40">{String(cd!.minutes).padStart(2,'0')}</p>
+                                      <p className="text-[8px] font-mono uppercase text-white/20 mt-0.5">min</p>
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="flex items-end gap-2">
+                                <div className="text-center">
+                                  <p className="text-2xl font-black leading-none text-amber-400">{String(cd!.hours).padStart(2,'0')}</p>
+                                  <p className="text-[8px] font-mono uppercase text-white/40 mt-0.5">hrs</p>
+                                </div>
+                                <div className="text-center">
+                                  <p className="text-xl font-black leading-none text-amber-300/70">{String(cd!.minutes).padStart(2,'0')}</p>
+                                  <p className="text-[8px] font-mono uppercase text-white/30 mt-0.5">min</p>
+                                </div>
+                              </div>
+                            )}
+                            <p className="text-[9px] text-white/30 font-medium mt-2 px-3 text-center">{game.release_date}</p>
+                          </div>
+                          </>
+                        );
+                      })()}
+                      <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a0a]/95 via-[#0a0a0a]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-3.5">
+                        <div className="transform translate-y-4 group-hover:translate-y-0 transition-transform duration-300">
+                          <h3 className="font-bold text-sm leading-tight mb-1.5 text-white">{game.title}</h3>
+                          <div className="flex flex-wrap gap-1 mb-1.5">
+                            {(game.tags ? Array.from(new Set(game.tags.split(',').map((t: string) => t.trim()))).slice(0, 3) : [game.genre]).filter(Boolean).map((tag: string) => (
+                              <span key={tag} className="text-[9px] font-mono uppercase tracking-widest bg-white/10 px-1.5 py-0.5 rounded text-white/70">{tag}</span>
+                            ))}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1.5 mb-2">
+                            {!getCountdown(game.release_date) && !getVagueUpcoming(game.release_date) && game.steam_rating ? (
+                              <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest bg-[#171a21] px-2 py-1 rounded border border-[#66c0f4]/20">
+                                <SteamIcon className="w-2.5 h-2.5 text-[#66c0f4] shrink-0"/>
+                                <span className="opacity-90 truncate">{game.steam_rating}</span>
+                              </div>
+                            ) : !getCountdown(game.release_date) && !getVagueUpcoming(game.release_date) && game.metacritic ? (
+                              <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest bg-white/5 px-2 py-1 rounded border border-white/10">
+                                <MetacriticIcon className="w-3 h-3 shrink-0"/>
+                                <span className={cn("px-1.5 py-0.5 rounded font-bold text-white text-[9px]", game.metacritic >= 61 ? "bg-green-600" : game.metacritic >= 40 ? "bg-yellow-600" : "bg-red-600")}>
+                                  {game.steam_url ? game.metacritic : (game.metacritic / 10).toFixed(1)}
+                                </span>
+                              </div>
+                            ) : null}
+                            {game.game_pass === 1 && (
+                              <button onClick={(e) => { e.stopPropagation(); openXboxApp(game.title); }}
+                                className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest bg-[#107c10]/20 px-2 py-1 rounded border border-[#107c10]/30 hover:bg-[#107c10]/40 transition-colors"
+>
+                                <XboxIcon className="w-2.5 h-2.5 text-[#107c10]"/>
+                                <span className="text-[#107c10] font-bold">Game Pass</span>
+                              </button>
+                            )}
+                            {epicFreeMap.has(game.title.toLowerCase().trim()) && (
+                              <button onClick={(e) => { e.stopPropagation(); { const u = epicFreeMap.get(game.title.toLowerCase().trim())!; const slug = u.match(/\/p\/([^/?]+)/)?.[1]; openInBrowser(slug ? `com.epicgames.launcher://store/p/${slug}` : u); }; }}
+                                className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest bg-[#0078f2]/20 px-2 py-1 rounded border border-[#0078f2]/30 hover:bg-[#0078f2]/40 transition-colors"
+                              >
+                                <EpicIcon className="w-2.5 h-2.5 text-[#4da6ff]"/>
+                                <span className="text-[#4da6ff] font-bold">Free on Epic</span>
+                              </button>
+                            )}
+                          </div>
+                          {!hidePrice && formatPrice(game.lowest_price) && (
+                            <div className="flex items-center gap-2">
+                              <Tag size={14} className="text-emerald-500"/>
+                              <span className="font-bold text-emerald-500">{formatPrice(game.lowest_price)}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                      );
+                    })()}
+                  </motion.div>
+                ))}
+              </div>
+            )}
+
+            {similarSuggestions.length> 0 && (
+              <div className="mt-14 pt-10 border-t border-white/5">
+                <div className="flex items-center justify-between mb-6">
+                  <div>
+                    <p className="text-xs font-mono uppercase tracking-[0.2em] opacity-50 mb-2">Discovery</p>
+                    <h2 className="text-4xl font-light tracking-tight">Suggested <span className="italic font-serif">Adventures</span></h2>
+                    <p className="text-xs text-white/40 mt-2">Based on your current backlog and library</p>
+                  </div>
+                  <button onClick={fetchSimilarSuggestionsData} disabled={isLoadingSimilar} className="flex items-center gap-2 px-6 py-3 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-all disabled:opacity-50 text-[10px] font-bold uppercase tracking-widest">
+                    <RefreshCw size={14} className={isLoadingSimilar ?"animate-spin" :""}/>
+                    Refresh Suggestions
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-6">
+                  {similarSuggestions.map((suggestion, idx) => (
+                    <motion.div key={idx} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: idx * 0.1 }}
+                      className="group relative aspect-[2/3] rounded-2xl overflow-hidden bg-[#1a1a1a] border border-white/10 cursor-pointer shadow-xl"
+                      onClick={() => { setSearchQuery(suggestion.title); setCurrentTab('home'); window.scrollTo({ top: 0, behavior:'smooth' }); }}
+>
+                      <img src={suggestion.artwork} alt={suggestion.title} loading="lazy" className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.03]" referrerPolicy="no-referrer"/>
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-3.5">
+                        <div className="transform translate-y-4 group-hover:translate-y-0 transition-transform duration-300">
+                          <h3 className="text-sm font-bold leading-tight mb-1.5">{suggestion.title}</h3>
+                          <div className="flex items-center justify-between">
+                            <span className="text-[9px] font-mono uppercase tracking-widest opacity-60 px-2 py-0.5 bg-white/10 rounded-full">{suggestion.genre}</span>
+                            <ArrowUpRight size={14} className="opacity-40 group-hover:opacity-100 transition-opacity"/>
+                          </div>
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         ) : currentTab ==='discover' ? (
-          <DiscoverPage
-            discoverData={discoverData}
-            suggestedForYou={suggestedForYou}
-            selectedDiscoverTag={selectedDiscoverTag}
-            tagGames={tagGames}
-            loadingTagGames={loadingTagGames}
-            discoverSearchQuery={discoverSearchQuery}
-            discoverSearchMode={discoverSearchMode}
-            discoverTitleSuggestions={discoverTitleSuggestions}
-            discoverSuggestionsOpen={discoverSuggestionsOpen}
-            discoverSearchLoading={discoverSearchLoading}
-            setDiscoverData={setDiscoverData as any}
-            setSuggestedForYou={setSuggestedForYou as any}
-            setDiscoverSearchQuery={setDiscoverSearchQuery}
-            setDiscoverSearchMode={setDiscoverSearchMode}
-            setDiscoverTitleSuggestions={setDiscoverTitleSuggestions as any}
-            setDiscoverSuggestionsOpen={setDiscoverSuggestionsOpen}
-            setSelectedDiscoverTag={setSelectedDiscoverTag}
-            setTagGames={setTagGames}
-            handleDiscoverGameClick={handleDiscoverGameClick}
-            fetchTagGames={fetchTagGames}
-            fetchDiscoverData={fetchDiscoverData}
-            fetchSuggestedForYou={fetchSuggestedForYou}
-            openInBrowser={openInBrowser}
-          />
+          <div className="space-y-8">
+            {/* Discover header */}
+            {(() => {
+              // Tag names must match Steam/SteamSpy's taxonomy exactly (case-sensitive)
+              const ALL_STEAMSPY_TAGS = [
+                // Core genres
+                'Action','Adventure','RPG','Strategy','Simulation','Puzzle','Platformer','Shooter','Horror','Survival',
+                'Indie','Casual','Sports','Racing','Fighting','Stealth','Rhythm','Music',
+                // RPG sub-genres
+                'Action RPG','JRPG','CRPG','MMORPG','Dungeon Crawler','Hack and Slash',"Beat 'em up",
+                // Strategy sub-genres
+                'Turn-Based','Turn-Based Strategy','Turn-Based Tactics','Tower Defense',
+                'Grand Strategy','4X','RTS','Auto Battler','City Builder','Colony Sim','Base Building',
+                // Shooter sub-genres
+                'FPS','Third-Person Shooter','Hero Shooter','Looter Shooter','Top-Down Shooter','Run and Gun','Battle Royale',
+                // Other sub-genres
+                'Metroidvania','Roguelike','Roguelite','Action Roguelike','Souls-like','MOBA',
+                'Card Game','Deckbuilding','Visual Novel','Walking Simulator','Point & Click','Interactive Fiction',
+                'Party Game','Board Game',
+                // Perspectives
+                'First-Person','Third-Person','Top-Down','Side Scroller','Isometric','2D','3D',
+                // Themes / Setting
+                'Open World','Sandbox','Open World Survival Craft','Exploration','Crafting','Building',
+                'Dark','Dark Fantasy','Fantasy','Sci-fi','Cyberpunk','Steampunk','Post-apocalyptic','Lovecraftian',
+                'Historical','Medieval','Victorian','Western','Noir',
+                'Space','Space Sim',
+                // Historical periods
+                'World War I','World War II','Cold War','Vietnam War','Feudal Japan',
+                // Art styles
+                'Anime','Pixel Art','Comic Book','Stylized','Realistic','Colorful','Cute',
+                // Tone
+                'Atmospheric','Psychological Horror','Thriller','Mystery','Detective','Dark Humor','Funny','Relaxing',
+                'Difficult','Emotional','Wholesome',
+                // Multiplayer
+                'Multiplayer','Co-op','Local Multiplayer','Online Co-Op','PvP','PvE','Massively Multiplayer',
+                // Mechanics
+                'Procedural Generation','Permadeath','Loot','Management','Tycoon','Economic',
+                'Hacking','Automation','Creature Collector','Life Sim','Dating Sim','Farming Sim','Fishing',
+                'Flight','Driving','Naval',
+                // Themes
+                'Military','War','Zombies','Vampire','Ninja','Samurai','Pirates','Mecha','Superhero',
+                'Aliens','Mythology','Norse Mythology','Greek Mythology','Magic',
+                // Additional
+                'Singleplayer','Story Rich','Female Protagonist','LGBTQ+','Satire','Surreal','Retro','Minimalist',
+                'Competitive','eSports','Tactical','Immersive Sim','Wargame',
+              ];
+              const filteredTags = discoverSearchQuery.trim()
+                ? ALL_STEAMSPY_TAGS.filter(t => t.toLowerCase().includes(discoverSearchQuery.toLowerCase()))
+                : ALL_STEAMSPY_TAGS.slice(0, 20);
+              return (
+                <div className="flex flex-col md:flex-row md:items-end justify-between gap-8 border-b border-white/10 pb-8">
+                  <div className="space-y-4 flex-1">
+                    <p className="text-xs font-mono uppercase tracking-[0.2em] opacity-50">Browse</p>
+                    <h2 className="text-6xl font-light tracking-tight">Discover <span className="italic font-serif">Games</span></h2>
+                    <div className="flex flex-col gap-4 pt-4">
+                      {/* Row 1: search input + refresh */}
+                      <div className="flex flex-wrap items-center gap-4">
+                        <div className="relative flex-1 min-w-[300px] max-w-md">
+                          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-white/30" size={18}/>
+                          <input
+                            type="text"
+                            value={discoverSearchQuery}
+                            onChange={e => { setDiscoverSearchQuery(e.target.value); setDiscoverSuggestionsOpen(true); }}
+                            onFocus={() => setDiscoverSuggestionsOpen(true)}
+                            onBlur={() => setTimeout(() => setDiscoverSuggestionsOpen(false), 150)}
+                            placeholder={discoverSearchMode === 'title' ? 'Search by game title…' : 'Search by tag…'}
+                            className="w-full bg-white/5 border border-white/10 rounded-full py-3 pl-12 pr-10 focus:outline-none focus:border-white/30 transition-all text-sm"
+                          />
+                          {discoverSearchLoading && <Loader2 className="absolute right-4 top-1/2 -translate-y-1/2 animate-spin text-white/30" size={14}/>}
+                          {!discoverSearchLoading && discoverSearchQuery && (
+                            <button onMouseDown={() => { setDiscoverSearchQuery(''); setDiscoverTitleSuggestions([]); setDiscoverSuggestionsOpen(false); setSelectedDiscoverTag(null); setTagGames([]); }} className="absolute right-4 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/70 transition-colors cursor-pointer">
+                              <X size={14}/>
+                            </button>
+                          )}
+                          {/* Dropdown */}
+                          {discoverSuggestionsOpen && discoverSearchQuery.trim().length >= 1 && (
+                            <div className="absolute top-full left-0 right-0 mt-2 bg-[#1a1a1a] border border-white/10 rounded-2xl overflow-hidden z-50 shadow-2xl max-h-72 overflow-y-auto">
+                              {discoverSearchMode === 'title' ? (
+                                discoverTitleSuggestions.length > 0 ? discoverTitleSuggestions.map(s => (
+                                  <button key={s.title + (s.steamAppID || '')}
+                                    onMouseDown={() => {
+                                      setDiscoverSuggestionsOpen(false);
+                                      setDiscoverSearchQuery(s.title);
+                                      const sid = s.steamAppID;
+                                      handleDiscoverGameClick({
+                                        _external: true,
+                                        id: sid || s.title,
+                                        title: s.title,
+                                        artwork: sid ? `https://cdn.akamai.steamstatic.com/steam/apps/${sid}/library_600x900.jpg` : (s.thumb || ''),
+                                        verticalArt: sid ? `https://cdn.akamai.steamstatic.com/steam/apps/${sid}/library_600x900.jpg` : s.thumb,
+                                        banner: sid ? `https://cdn.akamai.steamstatic.com/steam/apps/${sid}/library_hero.jpg` : undefined,
+                                        steamAppID: sid,
+                                        platform: s.platform,
+                                      } as any);
+                                    }}
+                                    className="w-full flex items-center gap-3 px-4 py-3 text-sm text-white/80 hover:bg-white/5 hover:text-white transition-colors cursor-pointer text-left"
+                                  >
+                                    <SuggestionThumb steamAppID={s.steamAppID} title={s.title} fallbackThumb={s.thumb} size="w-8 h-8"/>
+                                    <span className="flex-1 font-medium truncate">{s.title}</span>
+                                    {s.steamAppID
+                                      ? <span className="text-[10px] font-mono uppercase tracking-widest text-[#66c0f4] bg-[#1b2838] px-1.5 py-0.5 rounded shrink-0">Steam</span>
+                                      : s.platform
+                                        ? <span className="text-[10px] font-mono uppercase tracking-widest text-white/30 shrink-0">{s.platform}</span>
+                                        : null
+                                    }
+                                  </button>
+                                )) : discoverSearchLoading ? null : (
+                                  <p className="px-4 py-3 text-sm text-white/30 italic">No results</p>
+                                )
+                              ) : (
+                                filteredTags.map(tag => (
+                                  <button key={tag}
+                                    onMouseDown={() => { fetchTagGames(tag); setDiscoverSearchQuery(tag); setDiscoverSuggestionsOpen(false); }}
+                                    className={cn("w-full text-left px-4 py-2.5 text-sm transition-colors cursor-pointer", selectedDiscoverTag === tag ? "bg-white/10 text-white font-semibold" : "text-white/70 hover:bg-white/5 hover:text-white")}
+                                  >{tag}</button>
+                                ))
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        <button onClick={() => { setDiscoverData(null); setSuggestedForYou(null); fetchDiscoverData(); fetchSuggestedForYou(true); }} className="p-3 rounded-full bg-white/5 border border-white/10 text-white/50 hover:text-white hover:bg-white/10 transition-all" title="Refresh">
+                          <RefreshCw size={18}/>
+                        </button>
+                      </div>
+                      {/* Row 2: Title / Tag toggle */}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <div className="flex items-center bg-white/5 p-1 rounded-full border border-white/10">
+                          <button onClick={() => { setDiscoverSearchMode('title'); setDiscoverSearchQuery(''); setDiscoverTitleSuggestions([]); setSelectedDiscoverTag(null); setTagGames([]); }}
+                            className={cn("px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer", discoverSearchMode === 'title' ? "bg-white text-[#141414]" : "text-white/50 hover:text-white")}
+                          >Title</button>
+                          <button onClick={() => { setDiscoverSearchMode('tag'); setDiscoverSearchQuery(''); setDiscoverTitleSuggestions([]); setSelectedDiscoverTag(null); setTagGames([]); }}
+                            className={cn("px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer", discoverSearchMode === 'tag' ? "bg-white text-[#141414]" : "text-white/50 hover:text-white")}
+                          >Tag</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Tag results row — shown above Epic banner */}
+            {selectedDiscoverTag && (
+              <div>
+                {loadingTagGames ? (
+                  <div className="flex gap-3 overflow-hidden">
+                    {Array.from({length: 8}).map((_, i) => (
+                      <div key={i} className="w-36 shrink-0 aspect-[2/3] rounded-2xl bg-white/5 animate-pulse border border-white/5"/>
+                    ))}
+                  </div>
+                ) : tagGames.length > 0 ? (
+                  <HorizontalScrollRow title={`Trending ${selectedDiscoverTag} Games`} icon={<Tag size={12} className="text-blue-400/60"/>}>
+                    {tagGames.map(game => (
+                      <motion.div key={game.id} whileHover={{ y: -6, scale: 1.02 }}
+                        onClick={() => handleDiscoverGameClick(game)}
+                        className="group relative w-44 shrink-0 aspect-[2/3] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start"
+                      >
+                        <img src={game.verticalArt || game.artwork} alt={game.title} loading="lazy" className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]" referrerPolicy="no-referrer"
+                          onError={(e) => {
+                            const img = e.target as HTMLImageElement;
+                            const sid = game.steamAppID;
+                            if (sid && !img.src.includes('/api/steamgriddb/portrait/')) img.src = `/api/steamgriddb/portrait/${sid}`;
+                            else img.style.display = 'none';
+                          }}
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                          <div className="absolute bottom-4 left-4 right-4">
+                            <h3 className="text-xs font-bold text-white mb-1 line-clamp-2 leading-tight">{game.title}</h3>
+                            {game.genre && <span className="text-[9px] font-mono uppercase tracking-widest text-white/50">{game.genre}</span>}
+                          </div>
+                        </div>
+                      </motion.div>
+                    ))}
+                  </HorizontalScrollRow>
+                ) : (
+                  <p className="text-sm text-white/30 italic">No results for "{selectedDiscoverTag}"</p>
+                )}
+              </div>
+            )}
+
+            {!discoverData ? (
+              <div className="py-24 flex flex-col items-center gap-4 text-white/30">
+                <Loader2 className="animate-spin" size={32}/>
+                <p className="text-xs font-mono uppercase tracking-widest animate-pulse">Loading Discover...</p>
+              </div>
+            ) : (
+              <div className="space-y-10">
+                {/* Free on Epic Games — hero banner (temporarily free only, not always-free) */}
+                {(discoverData.epicFree ?? []).filter((g: any) => !g.alwaysFree).length > 0 && (
+                  <EpicHeroBanner
+                    games={(discoverData.epicFree ?? []).filter((g: any) => !g.alwaysFree)}
+                    onDetails={handleDiscoverGameClick}
+                    onOpenInBrowser={openInBrowser}
+                  />
+                )}
+
+                {[
+                  { list: discoverData.recentlyReleased, title: 'Trending on Steam', icon: <Sparkles size={12} className="text-yellow-400/60"/> },
+                  { list: discoverData.trending, title: 'Top Sellers', icon: <TrendingUp size={12} className="text-orange-400/60"/> },
+                  { list: discoverData.gamePass, title: 'Recently Added to Game Pass', icon: <span className="text-[#107c10]/60 font-black text-[10px]">✦</span> },
+                ].map(({ list, title, icon }) => list.length > 0 && (
+                  <HorizontalScrollRow key={title} title={title} icon={icon}>
+                    {list.map((game) => (
+                      <motion.div key={game.id} whileHover={{ y: -6, scale: 1.02 }}
+                        onClick={() => handleDiscoverGameClick(game)}
+                        className="group relative w-44 shrink-0 aspect-[2/3] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start"
+                      >
+                        <img src={game.verticalArt || game.artwork} alt={game.title} loading="lazy" className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]" referrerPolicy="no-referrer"
+                          onError={(e) => {
+                            const img = e.target as HTMLImageElement;
+                            const sid = (game as any).steamAppID;
+                            const msArt = (game as any).msArt;
+                            const src = img.src;
+                            if (sid) {
+                              if (src.includes('library_600x900_2x')) {
+                                img.src = `https://shared.steamstatic.com/store_item_assets/steam/apps/${sid}/library_600x900.jpg`;
+                              } else if (src.includes('library_600x900.jpg') && !src.includes('_2x')) {
+                                img.src = `https://shared.steamstatic.com/store_item_assets/steam/apps/${sid}/library_capsule_2x.jpg`;
+                              } else if (src.includes('library_capsule_2x')) {
+                                img.src = `https://shared.steamstatic.com/store_item_assets/steam/apps/${sid}/library_capsule.jpg`;
+                              } else if (src.includes('library_capsule.jpg') && !src.includes('_2x')) {
+                                img.src = `https://shared.steamstatic.com/store_item_assets/steam/apps/${sid}/header.jpg`;
+                              } else if (msArt && src !== msArt) {
+                                img.src = msArt;
+                              } else {
+                                img.style.display = 'none';
+                              }
+                            } else if (msArt && src !== msArt) {
+                              img.src = msArt;
+                            } else {
+                              img.style.display = 'none';
+                            }
+                          }}
+                        />
+                        {false && (
+                          <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+                            <Loader2 size={24} className="animate-spin text-white/70"/>
+                          </div>
+                        )}
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                          <div className="absolute bottom-4 left-4 right-4">
+                            <h3 className="text-xs font-bold text-white mb-1 line-clamp-2 leading-tight">{game.title}</h3>
+                            {game.genre && <span className="text-[9px] font-mono uppercase tracking-widest text-white/50">{game.genre}</span>}
+                          </div>
+                        </div>
+                      </motion.div>
+                    ))}
+                  </HorizontalScrollRow>
+                ))}
+
+
+                {/* Suggested for You */}
+                <HorizontalScrollRow title="Suggested for You" icon={<Sparkles size={12} className="text-purple-400/60"/>}>
+                  {suggestedForYou === null ? (
+                    Array.from({ length: 6 }).map((_, i) => (
+                      <div key={i} className="w-44 shrink-0 aspect-[2/3] rounded-2xl bg-white/5 animate-pulse border border-white/5"/>
+                    ))
+                  ) : suggestedForYou.map((game) => (
+                    <motion.div key={game.id} whileHover={{ y: -6, scale: 1.02 }}
+                      onClick={() => handleDiscoverGameClick(game)}
+                      className="group relative w-44 shrink-0 aspect-[2/3] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start"
+                    >
+                      <img src={game.verticalArt || game.artwork} alt={game.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]" referrerPolicy="no-referrer"
+                        onError={(e) => {
+                          const img = e.target as HTMLImageElement;
+                          const sid = (game as any).steamAppID;
+                          const msArt = (game as any).msArt;
+                          const src = img.src;
+                          if (sid) {
+                            if (src.includes('library_600x900_2x')) {
+                              img.src = `https://shared.steamstatic.com/store_item_assets/steam/apps/${sid}/library_600x900.jpg`;
+                            } else if (src.includes('library_600x900.jpg') && !src.includes('_2x')) {
+                              img.src = `https://shared.steamstatic.com/store_item_assets/steam/apps/${sid}/library_capsule_2x.jpg`;
+                            } else if (src.includes('library_capsule_2x')) {
+                              img.src = `https://shared.steamstatic.com/store_item_assets/steam/apps/${sid}/library_capsule.jpg`;
+                            } else if (src.includes('library_capsule.jpg') && !src.includes('_2x')) {
+                              img.src = `https://shared.steamstatic.com/store_item_assets/steam/apps/${sid}/header.jpg`;
+                            } else if (msArt && src !== msArt) {
+                              img.src = msArt;
+                            } else {
+                              img.style.display = 'none';
+                            }
+                          } else if (msArt && src !== msArt) {
+                            img.src = msArt;
+                          } else {
+                            img.style.display = 'none';
+                          }
+                        }}
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                        <div className="absolute bottom-4 left-4 right-4">
+                          <h3 className="text-xs font-bold text-white mb-1 line-clamp-2 leading-tight">{game.title}</h3>
+                          {game.genre && <span className="text-[9px] font-mono uppercase tracking-widest text-white/50">{game.genre}</span>}
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+                </HorizontalScrollRow>
+              </div>
+            )}
+          </div>
         ) : (
-          <LauncherPage
-            user={user}
-            launcherGames={launcherGames}
-            filteredLauncherGames={filteredLauncherGames}
-            launcherSearch={launcherSearch}
-            launcherPlatformFilter={launcherPlatformFilter}
-            launcherInstalledFilter={launcherInstalledFilter}
-            launcherSelectedTags={launcherSelectedTags}
-            openPlatformSettings={openPlatformSettings}
-            steamId={steamId}
-            isSyncing={isSyncing}
-            isSyncingHltb={isSyncingHltb}
-            confirmClearLibrary={confirmClearLibrary}
-            showHiddenGames={showHiddenGames}
-            setLauncherSearch={setLauncherSearch}
-            setLauncherPlatformFilter={setLauncherPlatformFilter}
-            setLauncherInstalledFilter={setLauncherInstalledFilter}
-            setLauncherSelectedTags={setLauncherSelectedTags}
-            setOpenPlatformSettings={setOpenPlatformSettings}
-            setSteamId={setSteamId}
-            setIsAddingLocalGame={setIsAddingLocalGame}
-            setConfirmClearLibrary={setConfirmClearLibrary}
-            setShowHiddenGames={setShowHiddenGames}
-            setSelectedGame={setSelectedGame}
-            handleSyncSteam={handleSyncSteam}
-            handleSyncXbox={handleSyncXbox}
-            handleSyncEa={handleSyncEa}
-            handleSyncEpic={handleSyncEpic}
-            handleSyncHltb={handleSyncHltb}
-            handleRefreshLibrary={handleRefreshLibrary}
-            handleHideGame={handleHideGame}
-            handleUnhideGame={handleUnhideGame}
-            clearLauncherLibrary={clearLauncherLibrary}
-            fetchLauncherGameDetails={fetchLauncherGameDetails}
-          />
+          <div className="space-y-8">
+            <div className="flex flex-col md:flex-row md:items-end justify-between gap-8 border-b border-white/10 pb-8">
+              <div className="space-y-4 flex-1">
+                <p className="text-xs font-mono uppercase tracking-[0.2em] opacity-50">Game Launcher</p>
+                <h2 className="text-6xl font-light tracking-tight">Your <span className="italic font-serif">Library</span></h2>
+                <div className="flex flex-col gap-4 pt-4">
+                  {/* 3-col grid: search | pill box | refresh. Connect panel spans cols 1–2 only,
+                      so its right edge always aligns with the pill box, not the refresh button. */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'minmax(300px, 448px) auto auto', columnGap: '16px', rowGap: '8px', alignSelf: 'flex-start', maxWidth: '100%' }}>
+                    {/* Col 1: Search bar */}
+                    <div className="relative">
+                      <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-white/30" size={18}/>
+                      <input
+                        type="text"
+                        placeholder="Search library..."
+                        value={launcherSearch}
+                        onChange={(e) => setLauncherSearch(e.target.value)}
+                        className="w-full bg-white/5 border border-white/10 rounded-full py-3 pl-12 pr-6 focus:outline-none focus:border-white/30 transition-all text-sm"
+                      />
+                    </div>
+                    {/* Col 2: Platform pill box */}
+                    <div className="flex items-center">
+                      <div className="flex items-center bg-white/5 border border-white/10 rounded-full p-1 gap-0.5">
+                        {([
+                          { id: 'steam' as const, icon: <SteamIcon className="w-4 h-4"/>, label: 'Steam', activeClass: 'bg-[#1b2838] text-[#c7d5e0]', inactiveClass: 'text-[#c7d5e0]/50 hover:text-[#c7d5e0]' },
+                          { id: 'xbox' as const, icon: <XboxIcon className="w-4 h-4"/>, label: 'Xbox', activeClass: 'bg-[#107c10] text-white', inactiveClass: 'text-[#52b043]/60 hover:text-[#52b043]' },
+                          { id: 'ea' as const, icon: <EAIcon className="w-4 h-4"/>, label: 'EA', activeClass: 'bg-[#ff4500] text-white', inactiveClass: 'text-[#ff6b35]/60 hover:text-[#ff6b35]' },
+                          { id: 'epic' as const, icon: <EpicIcon className="w-4 h-4"/>, label: 'Epic', activeClass: 'bg-[#0078f2] text-white', inactiveClass: 'text-[#4da6ff]/60 hover:text-[#4da6ff]' },
+                        ]).map(p => {
+                          const isSelected = launcherPlatformFilter === p.id;
+                          const isSettingsOpen = openPlatformSettings === p.id;
+                          return (
+                            <div key={p.id} className={cn('flex items-center rounded-full transition-all', isSelected ? p.activeClass : '')}>
+                              <button
+                                onClick={() => { setLauncherPlatformFilter(isSelected ? 'all' : p.id); setOpenPlatformSettings(null); }}
+                                className={cn('flex items-center gap-1.5 py-2 rounded-full transition-all', isSelected ? 'pl-3 pr-1.5' : 'px-3', !isSelected && p.inactiveClass)}
+                              >
+                                {p.icon}
+                                <AnimatePresence>
+                                  {isSelected && (
+                                    <motion.span key="label" initial={{ opacity: 0, width: 0 }} animate={{ opacity: 1, width: 'auto' }} exit={{ opacity: 0, width: 0 }} className="text-[10px] font-bold uppercase tracking-widest overflow-hidden whitespace-nowrap">
+                                      {p.label}
+                                    </motion.span>
+                                  )}
+                                </AnimatePresence>
+                              </button>
+                              {isSelected && (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); setOpenPlatformSettings(isSettingsOpen ? null : p.id); }}
+                                  className="pr-2 py-2 opacity-60 hover:opacity-100 transition-opacity"
+                                  title={`${p.label} settings`}
+                                >
+                                  <ChevronDown size={11} className={cn('transition-transform', isSettingsOpen && 'rotate-180')}/>
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    {/* Col 3: Refresh button — outside the connect panel span */}
+                    <button onClick={handleRefreshLibrary} disabled={isSyncing} className="p-3 rounded-full bg-white/5 border border-white/10 text-white/50 hover:text-white hover:bg-white/10 transition-all disabled:opacity-50 self-center" title="Refresh Library">
+                      <RefreshCw size={18} className={isSyncing ?'animate-spin' :''}/>
+                    </button>
+                    {/* Row 2: Connect panel — spans cols 1–2 only, ends at pill's right edge */}
+                    <AnimatePresence>
+                      {openPlatformSettings === 'steam' && (
+                        <motion.div key="steam" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} style={{ gridColumn: '1 / 3' }} className="flex items-center gap-2 bg-[#1b2838]/60 p-2 rounded-2xl border border-[#c7d5e0]/15">
+                          {steamId.trim() && <span className="pl-2 text-xs text-[#c7d5e0]/60 flex items-center gap-1.5 shrink-0"><Check size={12} className="text-emerald-500"/>Linked</span>}
+                          <input type="text" placeholder="Enter Steam ID" value={steamId} onChange={(e) => setSteamId(e.target.value)} className="bg-transparent border-none px-4 py-2 text-sm focus:outline-none flex-1 min-w-0 text-[#c7d5e0] placeholder-[#c7d5e0]/30"/>
+                          <button onClick={handleSyncSteam} disabled={isSyncing} className="shrink-0 bg-[#1b2838] text-[#c7d5e0] border border-[#c7d5e0]/30 px-6 py-2 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-[#2a3f5f] transition-all disabled:opacity-50">
+                            {isSyncing ? <Loader2 className="animate-spin" size={16}/> : steamId.trim() ? 'Sync Steam' : 'Connect Steam'}
+                          </button>
+                        </motion.div>
+                      )}
+                      {openPlatformSettings === 'xbox' && (
+                        <motion.div key="xbox" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} style={{ gridColumn: '1 / 3' }} className="flex items-center gap-3 bg-[#107c10]/20 p-2 pl-4 rounded-2xl border border-[#107c10]/30">
+                          {user?.xbox_id && <span className="text-xs text-[#52b043] flex items-center gap-1.5 shrink-0"><Check size={12}/>Linked</span>}
+                          <div className="flex-1"/>
+                          <button onClick={handleSyncXbox} disabled={isSyncing} className="shrink-0 bg-[#107c10] text-white px-6 py-2 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-[#158a15] transition-all disabled:opacity-50">
+                            {isSyncing ? <Loader2 className="animate-spin" size={16}/> : user?.xbox_id ? 'Sync Xbox' : 'Connect Xbox'}
+                          </button>
+                        </motion.div>
+                      )}
+                      {openPlatformSettings === 'ea' && (
+                        <motion.div key="ea" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} style={{ gridColumn: '1 / 3' }} className="flex items-center justify-end bg-[#ff4500]/20 p-2 rounded-2xl border border-[#ff4500]/30">
+                          <button onClick={handleSyncEa} disabled={isSyncing} className="shrink-0 bg-[#ff4500] text-white px-6 py-2 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-[#e03d00] transition-all disabled:opacity-50">
+                            {isSyncing ? <Loader2 className="animate-spin" size={16}/> : 'Sync EA Games'}
+                          </button>
+                        </motion.div>
+                      )}
+                      {openPlatformSettings === 'epic' && (
+                        <motion.div key="epic" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} style={{ gridColumn: '1 / 3' }} className="flex items-center gap-3 bg-[#0078f2]/20 p-2 pl-4 rounded-2xl border border-[#0078f2]/30">
+                          {user?.epic_account_id && <span className="text-xs text-[#4da6ff] flex items-center gap-1.5 shrink-0"><Check size={12}/>Linked</span>}
+                          <div className="flex-1"/>
+                          <button onClick={handleSyncEpic} disabled={isSyncing} className="shrink-0 bg-[#0078f2] text-white px-6 py-2 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-[#0060cc] transition-all disabled:opacity-50">
+                            {isSyncing ? <Loader2 className="animate-spin" size={16}/> : user?.epic_account_id ? 'Sync Library' : 'Connect Epic'}
+                          </button>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+
+                  {/* HLTB sync */}
+                  <div className="flex items-center justify-between px-1">
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-lg flex items-center justify-center text-sm font-black" style={{ background: 'linear-gradient(135deg,#6366f1,#8b5cf6)' }}>⏱</div>
+                      <div>
+                        <p className="text-sm font-bold text-white/90">HowLongToBeat</p>
+                        <p className="text-[10px] text-white/40">Sync completion data for all games</p>
+                      </div>
+                    </div>
+                    <button onClick={handleSyncHltb} disabled={isSyncingHltb}
+                      className="shrink-0 px-5 py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-all disabled:opacity-50"
+                      style={{ background: 'linear-gradient(135deg,#6366f1,#8b5cf6)', color: 'white' }}>
+                      {isSyncingHltb ? <Loader2 className="animate-spin" size={14}/> : 'Sync HLTB'}
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-1 bg-white/5 p-1 rounded-full border border-white/10">
+                      {(['all','installed','not-installed'] as const).map((filter) => (
+                        <button key={filter} onClick={() => setLauncherInstalledFilter(filter)}
+                          className={cn("px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all", launcherInstalledFilter === filter ?"bg-white text-[#141414]" :"text-white/50 hover:text-white")}
+>
+                          {filter ==='all' ?'All Games' : filter ==='installed' ?'Installed' : 'Owned'}
+                        </button>
+                      ))}
+                    </div>
+                    {Array.from(new Set(launcherGames.flatMap(g => g.tags ? g.tags.split(',').map(t => t.trim()) : []))).length> 0 && (
+                      <TagDropdown
+                        availableTags={Array.from(new Set(launcherGames.flatMap(g => g.tags ? g.tags.split(',').map(t => t.trim()) : []))).sort()}
+                        selectedTags={launcherSelectedTags}
+                        setSelectedTags={setLauncherSelectedTags}
+/>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-4 items-center">
+                <button onClick={() => setIsAddingLocalGame(true)} className="flex items-center gap-2 px-6 py-3 rounded-full bg-emerald-600 text-white hover:bg-emerald-500 transition-all text-sm font-bold uppercase tracking-widest shadow-lg shadow-emerald-900/20">
+                  <Plus size={18}/> Add Game
+                </button>
+                {launcherGames.length> 0 && (
+                  <div className="relative flex items-center">
+                    {confirmClearLibrary ? (
+                      <div className="flex items-center gap-2 bg-red-100 p-1.5 rounded-full border border-red-900/50 animate-in fade-in slide-in-from-right-4 shadow-sm">
+                        <AlertTriangle size={16} className="text-red-600 ml-2"/>
+                        <span className="text-sm font-bold text-red-400 mr-1">Clear entire library?</span>
+                        <button
+                          onClick={() => setConfirmClearLibrary(false)}
+                          className="px-4 py-2 bg-[#1a1a1a] text-red-400 rounded-full text-xs font-bold hover:bg-red-900/20 transition-colors cursor-pointer"
+>
+                          Cancel
+                        </button>
+                        <button
+                          onClick={clearLauncherLibrary}
+                          className="px-4 py-2 bg-red-600 text-white rounded-full text-xs font-bold hover:bg-red-700 transition-colors cursor-pointer"
+>
+                          Yes, Clear
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmClearLibrary(true)}
+                        className="flex items-center gap-2 px-5 py-2.5 rounded-full bg-red-900/20 text-red-600 hover:bg-red-900/40 hover:text-red-400 transition-colors font-bold text-sm cursor-pointer border border-red-900/30"
+>
+                        <Trash2 size={18}/>
+                        <span className="hidden sm:inline">
+                          Clear Library
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {launcherGames.length === 0 ? (
+              <div className="py-24 text-center space-y-6">
+                <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mx-auto border border-white/10">
+                  <Gamepad2 size={32} className="opacity-20"/>
+                </div>
+                <div className="space-y-2">
+                  <h3 className="text-xl font-bold">No games in library</h3>
+                  <p className="text-white/50 max-w-md mx-auto">Sync your Steam library or add local games to start using QuestLog as your primary game launcher.</p>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-8">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-white/50 flex items-center gap-2.5">
+                    <Library size={12} className="text-blue-500/60"/>
+                    {showHiddenGames ? 'Hidden Games' : 'Library'}
+                    <span className="font-normal normal-case tracking-normal text-white/30">{filteredLauncherGames.length} games</span>
+                  </h3>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setShowHiddenGames(!showHiddenGames)}
+                      className={cn("flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold transition-colors border cursor-pointer",
+                        showHiddenGames
+                          ? "bg-violet-600 text-white border-violet-500"
+                          : "bg-white/5 text-white/40 border-white/10 hover:border-violet-500/40 hover:text-white/60")}>
+                      {showHiddenGames ? <Eye size={12}/> : <EyeOff size={12}/>}
+                      {showHiddenGames ? 'Show Library' : 'Show Hidden'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
+                  {filteredLauncherGames
+                    .map(game => (
+                      <motion.div
+                        key={game.id}
+                        layoutId={`launcher-game-${game.id}`}
+                        whileHover={{ y: -8, scale: 1.02 }}
+                        onClick={() => { setSelectedGame(game as any); fetchLauncherGameDetails(game.id); }}
+                        className="group relative aspect-[2/3] rounded-2xl overflow-hidden bg-[#1a1a1a] shadow-lg ring-1 ring-white/10 cursor-pointer"
+>
+                        <div className="absolute inset-0 bg-white/5 group-hover:bg-white/10 transition-colors"/>
+                        {!game.installed && (
+                          <div className="absolute inset-0 bg-black/40 z-10 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                            <div className="bg-black/60 px-3 py-1.5 rounded-full border border-white/20 flex items-center gap-2">
+                              <Download size={14} className="text-white/70"/>
+                              <span className="text-[10px] font-bold uppercase tracking-widest text-white/70">Owned</span>
+                            </div>
+                          </div>
+                        )}
+                        <img src={game.artwork} alt={game.title} loading="lazy" className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-[1.03]" referrerPolicy="no-referrer" onError={(e) => {
+                            const target = e.target as HTMLImageElement;
+                            if (target.src.includes('library_capsule_2x.jpg')) {
+                              target.src = target.src.replace('library_capsule_2x.jpg','library_capsule.jpg');
+                            } else if (target.src.includes('library_capsule.jpg')) {
+                              target.src = target.src.replace('library_capsule.jpg','library_600x900.jpg');
+                            } else {
+                              target.src ='https://picsum.photos/seed/game/600/900';
+                            }
+                          }}
+/>
+                        <div className="absolute inset-0 z-20 bg-gradient-to-t from-black/95 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 p-4 flex flex-col justify-end">
+                          <div className="transform translate-y-4 group-hover:translate-y-0 transition-transform duration-300">
+                            <h3 className="font-bold text-sm leading-tight mb-2 drop-shadow-lg line-clamp-2">{game.title}</h3>
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest text-white/60">
+                                <Clock size={10} className="text-emerald-500"/>
+                                {Math.round(game.playtime/ 60)}h
+                              </div>
+                              <button onClick={(e) => { e.stopPropagation(); game.hidden ? handleUnhideGame(game.id) : handleHideGame(game.id); }}
+                                className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white/60 hover:text-white transition-all"
+                                title={game.hidden ?"Unhide Game" :"Hide Game"}
+>
+                                {game.hidden ? <Eye size={14}/> : <EyeOff size={14}/>}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="absolute top-3 right-3 p-1.5 bg-black/60 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity">
+                          {game.platform === 'steam' ? <SteamIcon className="w-3 h-3 text-white"/> : game.platform === 'ea' ? <EAIcon className="w-4 h-4 text-white"/> : game.platform === 'epic' ? <EpicIcon className="w-3 h-3 text-white"/> : <XboxIcon className="w-3 h-3 text-white"/>}
+                        </div>
+                      </motion.div>
+                    ))}
+                </div>
+              </div>
+            )}
+          </div>
         )}
       </main>
 

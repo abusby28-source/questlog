@@ -57,7 +57,18 @@
       "Bash(sqlite3:*)",
       "Bash(python3:*)",
       "Bash(find:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(ls:*)",
+      "Read(//c/Users/abusb/Documents/questlog_-video-game-backlog-trackerv3/NR==6084,NR==6894{size+=length\\($0\\)+1}END{printf \"\"\"\"GameDetailPanel: %d bytes / %.1f KB/n\"\"\"\", size, size/**)",
+      "Read(//c/Users/abusb/Documents/questlog_-video-game-backlog-trackerv3/NR==7203,NR==7684{size+=length\\($0\\)+1}END{printf \"\"\"\"CompanionsModal: %d bytes / %.1f KB/n\"\"\"\", size, size/**)",
+      "Read(//c/Users/abusb/Documents/questlog_-video-game-backlog-trackerv3/NR==7782,NR==7984{size+=length\\($0\\)+1}END{printf \"\"\"\"DailyDigestModal: %d bytes / %.1f KB/n\"\"\"\", size, size/**)",
+      "Read(//c/Users/abusb/Documents/questlog_-video-game-backlog-trackerv3/NR==7712,NR==7780{size+=length\\($0\\)+1}END{printf \"\"\"\"ScheduleSessionModal: %d bytes / %.1f KB/n\"\"\"\", size, size/**)",
+      "Bash(awk:*)",
+      "Bash(wc:*)",
+      "Bash(npm view:*)",
+      "WebFetch(domain:howlongtobeat.com)",
+      "Bash(gh api:*)",
+      "Bash(sed:*)"
     ]
   }
 }

@@ -4188,11 +4188,8 @@ export default function App() {
                       const ach = parseAchievements(game);
                       const achPct = ach ? ach.unlocked / ach.total : null;
                       const hpct = isProgressGame(game) ? hltbProgress(game) : null;
-                      // Playtime bar: soft-cap at 3000 min (50h), shown only if game has been played
-                      const playtimePct = (game.playtime ?? 0) > 0 ? Math.min(1, game.playtime / 3000) : null;
-                      // Priority: achievements → HLTB → raw playtime
-                      const pct = achPct ?? hpct ?? playtimePct;
-                      const barType = achPct !== null ? 'ach' : hpct !== null ? 'hltb' : 'time';
+                      const pct = achPct ?? hpct ?? null;
+                      const barType = achPct !== null ? 'ach' : 'hltb';
                       const tag = jumpBackInTag(game);
                       return (
                         <motion.div key={game.id} whileHover={{ y: -5 }}
@@ -4225,15 +4222,9 @@ export default function App() {
                                       <div key={mark} className="absolute inset-y-0 w-px bg-black/40" style={{ left: `${mark * 100}%` }}/>
                                     ))}
                                   </div>
-                                  {barType === 'time' ? (
-                                    <span className="text-[8px] font-bold text-amber-400/80">
-                                      {game.playtime >= 60 ? `${Math.round(game.playtime / 60)}h` : `${game.playtime}m`}
-                                    </span>
-                                  ) : (
-                                    <span className="text-[8px] font-bold" style={{ color: barType === 'hltb' ? `hsl(${250 + pct * 30}, 70%, 70%)` : `hsl(${140 * pct}, 80%, 60%)` }}>
-                                      {Math.round(pct * 100)}%
-                                    </span>
-                                  )}
+                                  <span className="text-[8px] font-bold" style={{ color: barType === 'hltb' ? `hsl(${250 + pct * 30}, 70%, 70%)` : `hsl(${140 * pct}, 80%, 60%)` }}>
+                                    {Math.round(pct * 100)}%
+                                  </span>
                                 </div>
                               )}
                             </div>
@@ -4528,10 +4519,10 @@ export default function App() {
                           const ach = parseAchievements(game);
                           const achPct = ach ? ach.unlocked / ach.total : null;
                           const hpct = isProgressGame(game) ? hltbProgress(game) : null;
-                          const pct = achPct ?? hpct ?? Math.min(1, (game.playtime ?? 0) / 3000);
-                          const barType = achPct !== null ? 'ach' : hpct !== null ? 'hltb' : 'time';
-                          const barGrad = barType === 'ach' ? 'linear-gradient(90deg,#10b981,#06b6d4)' : barType === 'hltb' ? 'linear-gradient(90deg,#6366f1,#a855f7)' : 'linear-gradient(90deg,#f59e0b,#f97316)';
-                          const pctColor = barType === 'time' ? '#f59e0b' : barType === 'hltb' ? '#a78bfa' : `hsl(${140 * pct},80%,60%)`;
+                          const pct = achPct ?? hpct ?? null;
+                          const barType = achPct !== null ? 'ach' : 'hltb';
+                          const barGrad = barType === 'ach' ? 'linear-gradient(90deg,#10b981,#06b6d4)' : 'linear-gradient(90deg,#6366f1,#a855f7)';
+                          const pctColor = barType === 'hltb' ? '#a78bfa' : `hsl(${140 * (pct ?? 0)},80%,60%)`;
                           const steamId = game.platform === 'steam' ? game.external_id : undefined;
                           return (
                             <div key={game.id} className="flex items-center gap-2">
@@ -4539,10 +4530,10 @@ export default function App() {
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center justify-between mb-1">
                                   <p className="text-[10px] font-semibold truncate text-white/80">{game.title}</p>
-                                  <span className="text-[10px] font-black ml-1.5 shrink-0 tabular-nums" style={{ color: pctColor }}>{Math.round(pct * 100)}%</span>
+                                  {pct !== null && <span className="text-[10px] font-black ml-1.5 shrink-0 tabular-nums" style={{ color: pctColor }}>{Math.round(pct * 100)}%</span>}
                                 </div>
                                 <div className="relative h-1.5 rounded-full bg-white/10 overflow-hidden">
-                                  <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct * 100}%`, background: barGrad }}/>
+                                  {pct !== null && <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct * 100}%`, background: barGrad }}/>}
                                 </div>
                               </div>
                             </div>
@@ -4578,21 +4569,17 @@ export default function App() {
                           const ach = parseAchievements(game);
                           const achPct = ach ? ach.unlocked / ach.total : null;
                           const hpct = isProgressGame(game) ? hltbProgress(game) : null;
-                          // Combo = has achievements AND has HLTB data, OR has achievements AND has playtime (use raw playtime as secondary)
-                          const hasHltbCombo = achPct !== null && hpct !== null;
-                          const hasTimeCombo = achPct !== null && !hpct && (game.playtime ?? 0) > 0;
-                          const hasCombo = hasHltbCombo || hasTimeCombo;
-                          const timePct = Math.min(0.99, (game.playtime ?? 0) / 3000);
+                          const hasCombo = achPct !== null && hpct !== null;
                           const completedByAch = achPct !== null && achPct >= 1;
                           const completedByHltb = hpct !== null && hpct >= 1;
                           const isComplete = completedByAch || completedByHltb;
-                          const pct = hasHltbCombo ? (achPct! + hpct!) / 2 : achPct ?? hpct ?? timePct;
-                          const barType = achPct !== null ? 'ach' : hpct !== null ? 'hltb' : 'time';
+                          const pct = hasCombo ? (achPct! + hpct!) / 2 : achPct ?? hpct ?? 0;
+                          const barType = achPct !== null ? 'ach' : 'hltb';
                           const steamId = game.platform === 'steam' ? game.external_id : undefined;
                           const heroBannerUrl = steamId
                             ? `https://shared.steamstatic.com/store_item_assets/steam/apps/${steamId}/library_hero.jpg`
                             : game.artwork;
-                          return { game, pct, barType, ach, achPct, hpct, timePct, hasCombo, hasHltbCombo, hasTimeCombo, isComplete, completedByAch, completedByHltb, steamId, heroBannerUrl };
+                          return { game, pct, barType, ach, achPct, hpct, hasCombo, isComplete, completedByAch, completedByHltb, steamId, heroBannerUrl };
                         });
                         const gamePcts = withPcts.filter(g => !g.isComplete).sort((a, b) => b.pct - a.pct);
                         const completedList = withPcts.filter(g => g.isComplete);
@@ -4600,21 +4587,15 @@ export default function App() {
                         const spotlight = gamePcts[0];
                         const achCount = withPcts.filter(g => g.achPct !== null && !g.isComplete).length;
                         const hltbCount = withPcts.filter(g => g.hpct !== null && !g.isComplete).length;
-                        const timeCount = withPcts.filter(g => g.barType === 'time' && !g.hasCombo && !g.isComplete).length;
                         const comboCount = withPcts.filter(g => g.hasCombo && !g.isComplete).length;
                         const medals = ['🥇','🥈','🥉'];
 
                         const renderBar = (g: typeof withPcts[0], delay: number, height = 'h-1.5') => {
                           if (g.hasCombo) {
-                            const secondPct = g.hasHltbCombo ? g.hpct! : g.timePct;
-                            const secondLabel = g.hasHltbCombo ? 'HLTB' : 'Time';
-                            const secondGrad = g.hasHltbCombo ? 'linear-gradient(90deg,#6366f1,#8b5cf6)' : 'linear-gradient(90deg,#f59e0b,#f97316)';
-                            const secondColor = g.hasHltbCombo ? 'text-indigo-400/60' : 'text-amber-400/60';
-                            const secondLabelColor = g.hasHltbCombo ? 'text-indigo-400/50' : 'text-amber-400/50';
                             return (
                               <div className="space-y-1">
                                 <div className="flex items-center gap-1.5">
-                                  <span className={`text-[8px] font-bold text-emerald-400/50 w-10 shrink-0`}>Ach</span>
+                                  <span className="text-[8px] font-bold text-emerald-400/50 w-10 shrink-0">Ach</span>
                                   <div className={`flex-1 ${height} rounded-full overflow-hidden`} style={{ background: 'rgba(255,255,255,0.05)' }}>
                                     <motion.div initial={{ width: 0 }} animate={{ width: `${g.achPct! * 100}%` }} transition={{ delay: delay + 0.05, duration: 0.6, ease: 'easeOut' }}
                                       className="h-full rounded-full" style={{ background: 'linear-gradient(90deg,#10b981,#06b6d4)' }}/>
@@ -4622,18 +4603,18 @@ export default function App() {
                                   <span className="text-[9px] font-mono text-emerald-400/60 w-8 text-right shrink-0">{Math.round(g.achPct! * 100)}%</span>
                                 </div>
                                 <div className="flex items-center gap-1.5">
-                                  <span className={`text-[8px] font-bold ${secondLabelColor} w-10 shrink-0`}>{secondLabel}</span>
+                                  <span className="text-[8px] font-bold text-indigo-400/50 w-10 shrink-0">HLTB</span>
                                   <div className={`flex-1 ${height} rounded-full overflow-hidden`} style={{ background: 'rgba(255,255,255,0.05)' }}>
-                                    <motion.div initial={{ width: 0 }} animate={{ width: `${secondPct * 100}%` }} transition={{ delay: delay + 0.1, duration: 0.6, ease: 'easeOut' }}
-                                      className="h-full rounded-full" style={{ background: secondGrad }}/>
+                                    <motion.div initial={{ width: 0 }} animate={{ width: `${g.hpct! * 100}%` }} transition={{ delay: delay + 0.1, duration: 0.6, ease: 'easeOut' }}
+                                      className="h-full rounded-full" style={{ background: 'linear-gradient(90deg,#6366f1,#8b5cf6)' }}/>
                                   </div>
-                                  <span className={`text-[9px] font-mono ${secondColor} w-8 text-right shrink-0`}>{Math.round(secondPct * 100)}%</span>
+                                  <span className="text-[9px] font-mono text-indigo-400/60 w-8 text-right shrink-0">{Math.round(g.hpct! * 100)}%</span>
                                 </div>
                               </div>
                             );
                           }
-                          const barGrad = g.barType === 'ach' ? 'linear-gradient(90deg,#10b981,#06b6d4)' : g.barType === 'hltb' ? 'linear-gradient(90deg,#6366f1,#8b5cf6)' : 'linear-gradient(90deg,#f59e0b,#f97316)';
-                          const glowColor = g.barType === 'ach' ? 'rgba(16,185,129,0.4)' : g.barType === 'hltb' ? 'rgba(99,102,241,0.4)' : 'rgba(245,158,11,0.4)';
+                          const barGrad = g.barType === 'ach' ? 'linear-gradient(90deg,#10b981,#06b6d4)' : 'linear-gradient(90deg,#6366f1,#8b5cf6)';
+                          const glowColor = g.barType === 'ach' ? 'rgba(16,185,129,0.4)' : 'rgba(99,102,241,0.4)';
                           return (
                             <div className={`${height} rounded-full overflow-hidden`} style={{ background: 'rgba(255,255,255,0.05)' }}>
                               <motion.div initial={{ width: 0 }} animate={{ width: `${g.pct * 100}%` }} transition={{ delay, duration: 0.6, ease: 'easeOut' }}
@@ -4718,15 +4699,6 @@ export default function App() {
                                       </div>
                                     </div>
                                   )}
-                                  {timeCount > 0 && (
-                                    <div className="flex-1 rounded-2xl p-4 border border-amber-500/20" style={{ background: 'rgba(245,158,11,0.08)' }}>
-                                      <p className="text-2xl font-black text-amber-400">{timeCount}</p>
-                                      <p className="text-[10px] font-bold text-amber-400/50 uppercase tracking-wider mt-0.5">Playtime</p>
-                                      <div className="mt-2 h-1 bg-amber-500/15 rounded-full overflow-hidden">
-                                        <motion.div initial={{ width: 0 }} animate={{ width: `${(timeCount / gamePcts.length) * 100}%` }} transition={{ duration: 0.5, delay: 0.2 }} className="h-full bg-amber-400 rounded-full"/>
-                                      </div>
-                                    </div>
-                                  )}
                                 </div>
                               </div>
                             )}
@@ -4737,15 +4709,13 @@ export default function App() {
                                 <h3 className="text-xs font-bold uppercase tracking-widest text-white/30 mb-4">Progress Ladder</h3>
                                 <div className="space-y-2">
                                   {gamePcts.map((g, idx) => {
-                                    const { game, pct, barType, ach, hpct, hasCombo, hasHltbCombo } = g;
-                                    const pctColor = hasCombo ? '#c084fc' : barType === 'time' ? '#f59e0b' : barType === 'hltb' ? '#818cf8' : `hsl(${140 * pct},80%,60%)`;
+                                    const { game, pct, barType, ach, hpct, hasCombo } = g;
+                                    const pctColor = hasCombo ? '#c084fc' : barType === 'hltb' ? '#818cf8' : `hsl(${140 * pct},80%,60%)`;
                                     const hrs = Math.round((game.playtime ?? 0) / 60 * 10) / 10;
-                                    const detail = hasHltbCombo && ach && game.hltb_main
+                                    const detail = hasCombo && ach && game.hltb_main
                                       ? `${ach.unlocked}/${ach.total} achievements · ${hrs}h / ~${game.hltb_main}h (HowLongToBeat)`
-                                      : hasCombo && ach
-                                      ? `${ach.unlocked}/${ach.total} achievements · ${hrs}h playtime`
                                       : barType === 'ach' && ach ? `${ach.unlocked}/${ach.total} achievements`
-                                      : barType === 'hltb' && game.hltb_main ? `${hrs}h played · ~${game.hltb_main}h main story (HowLongToBeat)`
+                                      : game.hltb_main && game.hltb_main > 0 ? `${hrs}h played · ~${game.hltb_main}h main story (HowLongToBeat)`
                                       : `${hrs}h played`;
                                     return (
                                       <motion.div key={game.id} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: idx * 0.05 }}

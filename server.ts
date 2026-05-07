@@ -8051,6 +8051,34 @@ async function fetchHltbHours(title: string): Promise<number | null> {
     console.log(`QuestLog Server active on port ${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 
+    // Background HLTB sync: fetch missing data for all played library games
+    setTimeout(async () => {
+      try {
+        const pending = db.prepare(
+          "SELECT id, title FROM launcher_games WHERE playtime > 0 AND hltb_main IS NULL ORDER BY last_played DESC"
+        ).all() as { id: number; title: string }[];
+        if (!pending.length) { console.log('[HLTB] All games already synced'); return; }
+        console.log(`[HLTB] Background sync starting for ${pending.length} games`);
+        for (const game of pending) {
+          try {
+            const hours = await fetchHltbHours(game.title);
+            if (hours !== null) {
+              db.prepare("UPDATE launcher_games SET hltb_main = ? WHERE id = ?").run(hours, game.id);
+              console.log(`[HLTB] ${game.title} → ${hours}h`);
+            } else {
+              db.prepare("UPDATE launcher_games SET hltb_main = -1 WHERE id = ?").run(game.id);
+            }
+          } catch (e) {
+            console.error(`[HLTB] Failed for ${game.title}:`, e);
+          }
+          await new Promise(r => setTimeout(r, 1200)); // ~1 req/sec, be polite
+        }
+        console.log('[HLTB] Background sync complete');
+      } catch (e) {
+        console.error('[HLTB] Background sync error:', e);
+      }
+    }, 5000); // 5s delay after startup
+
     // Daily price + Game Pass refresh for all users
     const DAILY_REFRESH_INTERVAL = 24 * 60 * 60 * 1000;
     setInterval(async () => {

@@ -92,6 +92,7 @@ export const remoteAddFriend = (username: string) => post<any>('/api/friends/add
 export const remoteRemoveFriend = (userId: number) => del(`/api/friends/${userId}`);
 export const remoteGetFriendRecentGames = (userId: number) => get<any[]>(`/api/friends/${userId}/recent-games`);
 export const remoteGetFriendStats = (userId: number) => get<any>(`/api/friends/${userId}/stats`);
+export const remoteGetFriendProgress = (userId: number) => get<any[]>(`/api/friends/${userId}/progress`);
 
 // ── Notifications ─────────────────────────────────────────────────────────────
 

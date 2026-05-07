@@ -25,7 +25,7 @@ import {
   remoteSyncStats, remoteSyncLibrary, remoteBackupLibrary, remoteRestoreLibrary,
   remoteSearchUsers,
   remoteGetFriends, remoteGetPendingFriends, remoteAddFriend, remoteRemoveFriend,
-  remoteGetFriendRecentGames, remoteGetFriendStats,
+  remoteGetFriendRecentGames, remoteGetFriendStats, remoteGetFriendProgress,
   remoteGetNotifications,
   remoteGetGroups, remoteCreateGroup, remoteJoinGroup, remoteDeleteGroup, remoteLeaveGroup,
   remoteGetSharedGames, remoteAddSharedGame, remoteUpdateSharedGame,
@@ -370,18 +370,23 @@ interface LauncherGame {
   previous_price?: string;
   game_pass_new?: number;
   game_pass_added_at?: string;
+  hltb_main?: number | null; // main story hours from IGDB/HLTB, -1 = no data found
+  matchedTags?: string[];
 }
 
 interface FriendEntry { id: number | string; username: string; avatar?: string; online_status: string; current_game?: string; }
 
 interface HomeData {
   recentlyPlayed: LauncherGame[];
-  friendsOnline: { steam: FriendEntry[]; xbox: FriendEntry[]; discord: FriendEntry[]; app: FriendEntry[] };
+  friendsOnline: { steam: FriendEntry[]; xbox: FriendEntry[]; epic: FriendEntry[]; discord: FriendEntry[]; app: FriendEntry[] };
   discordGuildId: string | null;
+  discordGuildName: string | null;
+  discordGuildIcon: string | null;
   discordLinked: boolean;
+  discordClientId: string | null;
+  discordGuildCached: boolean;
   recentAchievements: { name: string, description: string, icon: string, gameTitle: string, gameArtwork: string, username: string, userAvatar?: string }[];
-  suggestedLog: Game[];
-  suggestedLibrary: LauncherGame[];
+  pickedForYou: (LauncherGame & { _source: 'library' | 'log'; matchedTags: string[] })[];
   suggestions: Game[];
   history: { date: string, minutes: number }[];
   updates: {
@@ -419,6 +424,9 @@ interface DiscoverGame {
   steamAppID?: string;
   friendName?: string;
   friendAvatar?: string;
+  lastPlayed?: string;
+  matchedLibraryId?: number | null;
+  matchedQuestlogId?: number | null;
 }
 
 interface DiscoverData {
@@ -481,18 +489,153 @@ function getSteamHorizontalArtwork(game: Game | LauncherGame, refreshKey?: numbe
   return `/api/steamgriddb/horizontal-by-name/${safeTitle}${cacheBust}`;
 }
 
+function formatLastPlayed(lastPlayed: string | null): string {
+  if (!lastPlayed) return 'Never';
+  const days = (Date.now() - new Date(lastPlayed).getTime()) / 86400000;
+  if (days < 1) return 'Today';
+  if (days < 2) return 'Yesterday';
+  if (days < 7) return `${Math.floor(days)}d ago`;
+  if (days < 30) return `${Math.floor(days / 7)}w ago`;
+  if (days < 365) return `${Math.floor(days / 30)}mo ago`;
+  return `${Math.floor(days / 365)}y ago`;
+}
+
+// Returns true for games where story/completion taglines make sense
+function isPartyGame(game: LauncherGame): boolean {
+  const partyGenre = /\bparty\b/i;
+  const partyTitle = /\bjackbox\b|\bpummel party\b|\bfall guys\b|\bamong us\b|\bGang Beasts\b|\bOvercooked\b|\bMoving Out\b|\bPlate Up\b|\bTools Up\b|\bHuman Fall Flat\b/i;
+  if (game.genre && partyGenre.test(game.genre)) return true;
+  if (game.tags && partyGenre.test(game.tags)) return true;
+  if (partyTitle.test(game.title)) return true;
+  return false;
+}
+
+function isProgressGame(game: LauncherGame): boolean {
+  const nonProgress = /\b(party|sports|sport|racing|massively multiplayer|mmo|pinball|board game|card game)\b/i;
+  const titleNonProgress = /\bjackbox\b|\bpummel party\b|\bfall guys\b|\bamong us\b|\bfifa\b|\bea fc\b|\bnba 2k\b|\bforza\b|\bneed for speed\b|\bwipeout\b/i;
+  if (game.genre && nonProgress.test(game.genre)) return false;
+  if (game.tags && nonProgress.test(game.tags)) return false;
+  if (titleNonProgress.test(game.title)) return false;
+  return true;
+}
+
+// Returns playtime progress 0–1 using HLTB main story hours, or null if unavailable
+function hltbProgress(game: LauncherGame): number | null {
+  if (!game.hltb_main || game.hltb_main <= 0) return null;
+  return Math.min(1, game.playtime / (game.hltb_main * 60));
+}
+
+function scoreJumpBackIn(game: LauncherGame): number {
+  let score = 0;
+  if (game.last_played) {
+    const days = (Date.now() - new Date(game.last_played).getTime()) / 86400000;
+    score += Math.max(0, 60 - days * 2); // recency: up to 60pts, decays over 30 days
+  }
+  // Achievement progress
+  if (game.achievements) {
+    try {
+      const achs = JSON.parse(game.achievements) as { unlocked: boolean }[];
+      if (achs.length > 0) {
+        const pct = achs.filter(a => a.unlocked).length / achs.length;
+        if (pct >= 0.9) score += 45;
+        else if (pct >= 0.6) score += 30 + (pct - 0.6) * 50;
+        else if (pct >= 0.3) score += pct * 20;
+      }
+    } catch { /* ignore */ }
+  }
+  // HLTB playtime progress (bonus for games close to completion)
+  const hpct = hltbProgress(game);
+  if (hpct !== null) {
+    if (hpct >= 0.8) score += 40;
+    else if (hpct >= 0.5) score += 20 + hpct * 20;
+    else if (hpct >= 0.2) score += hpct * 15;
+  }
+  return score;
+}
+
+function jumpBackInTag(game: LauncherGame): { label: string; color: string } {
+  const pick = (options: string[]) => options[game.id % options.length];
+  const days = game.last_played ? (Date.now() - new Date(game.last_played).getTime()) / 86400000 : null;
+  const progress = isProgressGame(game);
+  const hpct = hltbProgress(game);
+
+  // Achievement-based completion (always relevant regardless of game type)
+  if (game.achievements) {
+    try {
+      const achs = JSON.parse(game.achievements) as { unlocked: boolean }[];
+      if (achs.length > 0) {
+        const pct = achs.filter(a => a.unlocked).length / achs.length;
+        if (pct >= 0.9) return { label: pick(['So close to finishing', 'One final push', 'Almost there', 'The finish line is right there']), color: 'text-orange-400' };
+        if (pct >= 0.7) return { label: pick(['Close to finishing', 'The end is in sight', 'Finish what you started', 'Nearly done']), color: 'text-yellow-400' };
+        if (pct >= 0.5) return { label: pick(['Good progress — keep going', "You're on a roll", 'Halfway there', 'More than halfway done']), color: 'text-emerald-400' };
+        if (pct >= 0.3) return { label: pick(['Building momentum', 'Getting into it', 'Making your mark', 'Just warming up']), color: 'text-blue-400' };
+      }
+    } catch { /* ignore */ }
+  }
+
+  // HLTB-based playtime progress (only for story/progress games)
+  if (progress && hpct !== null) {
+    if (hpct >= 0.9) return { label: pick(['Almost at the credits', 'One final push', 'So close to finishing', 'The end is near']), color: 'text-orange-400' };
+    if (hpct >= 0.7) return { label: pick(['The end is in sight', 'Close to finishing', 'Nearly there', `${Math.round(hpct * 100)}% through`]), color: 'text-yellow-400' };
+    if (hpct >= 0.5) return { label: pick(['More than halfway done', "You're on a roll", 'Good progress', `${Math.round(hpct * 100)}% through`]), color: 'text-emerald-400' };
+    if (hpct >= 0.25) return { label: pick(['Getting into it', 'Building momentum', 'Making your mark', 'Warming up nicely']), color: 'text-blue-400' };
+  }
+
+  if (days === null) return { label: 'Unfinished business', color: 'text-white/40' };
+
+  // Non-progress games (party, sports, etc.) get neutral recency-based tags
+  if (!progress) {
+    if (days < 3)  return { label: pick(['Jump back in', 'Play again?', 'Still fresh']), color: 'text-blue-400' };
+    if (days < 14) return { label: pick(["Been a few days", 'Round two?', 'Time for another session']), color: 'text-emerald-400' };
+    if (days < 60) return { label: pick(["Ready for another round?", 'Fire it back up', "It's been a while"]), color: 'text-yellow-400' };
+    return { label: pick(['Long time no see', 'Dust it off', 'Worth another session']), color: 'text-white/40' };
+  }
+
+  // Recently started but hasn't returned (< 2h played, > 3 days away)
+  if ((game.playtime ?? 0) < 120 && days > 3) {
+    return { label: pick(["You barely scratched the surface", "Give it a proper chance", "The real game hasn't begun", "Just getting started"]), color: 'text-blue-400' };
+  }
+
+  // Started a while ago with low playtime — likely abandoned early
+  if ((game.playtime ?? 0) < 300 && days > 30) {
+    return { label: pick(["Left before it got good", "Give it another shot", "It gets better — trust us", "Pick it back up"]), color: 'text-yellow-400' };
+  }
+
+  if (days < 1)   return { label: pick(['Just picked up', 'Fresh session', 'Still in the zone', 'Right where you left it']), color: 'text-blue-400' };
+  if (days < 3)   return { label: pick(['Pick up where you left off', 'Still fresh', 'Jump right back in', 'Keep the momentum going']), color: 'text-emerald-400' };
+  if (days < 7)   return { label: pick(["Don't lose your momentum", 'Keep the streak alive', "Been a few days", 'Your save is waiting']), color: 'text-emerald-400' };
+  if (days < 14)  return { label: pick(["It's been a week", 'Left on a cliffhanger?', "Don't let it gather dust", "Time to get back at it"]), color: 'text-yellow-400' };
+  if (days < 30)  return { label: pick(['It misses you', 'Almost forgotten', 'Ready to return?', "Where did you leave off?"]), color: 'text-yellow-400' };
+  if (days < 90)  return { label: pick(['Time to revisit', 'Unfinished business', 'Your save file awaits', 'The story continues']), color: 'text-orange-400' };
+  if (days < 365) return { label: pick(['Long time no see', "Left before it got good?", 'Dust it off', 'Give it another chance']), color: 'text-red-400' };
+  return { label: pick(['A blast from the past', 'Rediscover this one', 'A forgotten adventure', 'Like playing it for the first time']), color: 'text-white/50' };
+}
+
+function parseAchievements(game: LauncherGame): { unlocked: number; total: number } | null {
+  if (!game.achievements) return null;
+  try {
+    const achs = JSON.parse(game.achievements) as { unlocked: boolean }[];
+    if (achs.length === 0) return null;
+    return { unlocked: achs.filter(a => a.unlocked).length, total: achs.length };
+  } catch { return null; }
+}
+
 const friendStatusDot: Record<string, string> = {
   online:'bg-emerald-500',
   in_game:'bg-blue-400',
   away:'bg-yellow-400',
+  idle:'bg-yellow-400',
   busy:'bg-red-500',
+  dnd:'bg-red-500',
   offline:'bg-white/20',
 };
 const friendStatusLabel: Record<string, string> = {
   online:'Online',
   in_game:'In Game',
   away:'Away',
-  busy:'Busy',
+  idle:'Idle',
+  busy:'Do Not Disturb',
+  dnd:'Do Not Disturb',
   offline:'Offline',
 };
 
@@ -524,26 +667,26 @@ const PlatformBadge = memo(({ platform }: { platform?: string }) => {
   return null;
 });
 
-const FriendRow = memo(({ friend, showStatus = true, lastPlayedAt, platform }: { friend: FriendEntry; showStatus?: boolean; lastPlayedAt?: string; platform?: string }) => {
+const FriendRow = memo(({ friend, showStatus = true, lastPlayedAt, platform, compact = false }: { friend: FriendEntry; showStatus?: boolean; lastPlayedAt?: string; platform?: string; compact?: boolean }) => {
   const status = friend.online_status ||'offline';
   const dotClass = friendStatusDot[status] ??'bg-white/20';
   const statusLabel = friendStatusLabel[status] ?? status;
   return (
-    <div className="flex items-center gap-4 group cursor-pointer">
-      <div className="relative">
+    <div className={cn("flex items-center group cursor-pointer", compact ? "gap-2.5" : "gap-4")}>
+      <div className="relative shrink-0">
         <img src={friend.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${friend.username}`}
-          className="w-10 h-10 rounded-2xl object-cover" alt={friend.username}/>
+          className={cn("object-cover", compact ? "w-7 h-7 rounded-xl" : "w-10 h-10 rounded-2xl")} alt={friend.username}/>
         {showStatus && (
-          <div className={cn("absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full border-2 border-[#0a0a0a]", dotClass)}/>
+          <div className={cn("absolute -bottom-0.5 -right-0.5 rounded-full border-2 border-[#0a0a0a]", dotClass, compact ? "w-2.5 h-2.5" : "w-3.5 h-3.5")}/>
         )}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <p className="font-bold truncate group-hover:text-emerald-500 transition-colors">{friend.username}</p>
+        <div className="flex items-center gap-1.5">
+          <p className={cn("font-bold truncate group-hover:text-emerald-500 transition-colors", compact ? "text-xs" : "")}>{friend.username}</p>
           <PlatformBadge platform={platform}/>
         </div>
         {showStatus && (
-          <p className="text-xs text-white/40 truncate">
+          <p className={cn("truncate", compact ? "text-[10px] text-white/40" : "text-xs text-white/40")}>
             {friend.current_game
               ? <span className="text-blue-300">{friend.current_game}</span>
               : statusLabel}
@@ -556,6 +699,84 @@ const FriendRow = memo(({ friend, showStatus = true, lastPlayedAt, platform }: {
     </div>
   );
 });
+
+// Compact avatar bubble used in Friends Online — circle avatar + status dot + name
+const FriendBubble = memo(({ friend }: { friend: FriendEntry }) => {
+  const [expanded, setExpanded] = React.useState(false);
+  const status = friend.online_status || 'offline';
+  const dotClass = friendStatusDot[status] ?? 'bg-white/20';
+  const statusLabel = friendStatusLabel[status] ?? 'Offline';
+  const statusColor = status === 'online' ? 'text-emerald-400'
+    : status === 'in_game' ? 'text-blue-400'
+    : (status === 'idle') ? 'text-yellow-400'
+    : (status === 'dnd' || status === 'busy') ? 'text-red-400'
+    : 'text-white/30';
+
+  return (
+    <div className="relative group/bubble">
+      {/* Hover name tooltip — only when collapsed */}
+      {!expanded && (
+        <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-black/80 backdrop-blur-sm text-white text-[9px] font-medium px-2 py-0.5 rounded-full whitespace-nowrap opacity-0 group-hover/bubble:opacity-100 transition-opacity pointer-events-none z-20">
+          {friend.current_game ? `${friend.username} · ${friend.current_game}` : friend.username}
+        </div>
+      )}
+      <motion.div
+        layout
+        onClick={() => setExpanded(e => !e)}
+        className={cn(
+          "flex items-center gap-2 cursor-pointer",
+          expanded ? "bg-white/5 ring-1 ring-white/10 pr-3 rounded-full" : "rounded-full"
+        )}
+        style={{ height: 36 }}
+        transition={{ layout: { duration: 0.2, ease: 'easeInOut' } }}
+      >
+        <div className="relative shrink-0">
+          <img
+            src={friend.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${friend.username}`}
+            className="w-9 h-9 rounded-full object-cover ring-1 ring-white/10 group-hover/bubble:ring-white/30 transition-all"
+            alt={friend.username}
+          />
+          <div className={cn("absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-[1.5px] border-[#0a0a0a]", dotClass)}/>
+          {friend.current_game && (
+            <div className="absolute -top-0.5 -left-0.5 w-2.5 h-2.5 rounded-full bg-blue-400 border-[1.5px] border-[#0a0a0a]"/>
+          )}
+        </div>
+        <AnimatePresence>
+          {expanded && (
+            <motion.div
+              initial={{ opacity: 0, width: 0 }}
+              animate={{ opacity: 1, width: 'auto' }}
+              exit={{ opacity: 0, width: 0 }}
+              transition={{ duration: 0.18, ease: 'easeInOut' }}
+              className="flex flex-col overflow-hidden whitespace-nowrap pr-1"
+            >
+              <span className="text-[11px] font-semibold text-white leading-tight">{friend.username}</span>
+              <span className={cn("text-[9px] font-medium leading-tight", statusColor)}>
+                {friend.current_game || statusLabel}
+              </span>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
+    </div>
+  );
+});
+
+// Row of avatar bubbles with overflow chip
+const FriendBubbles = ({ friends, max = 7 }: { friends: FriendEntry[]; max?: number }) => {
+  const shown = friends.slice(0, max);
+  const overflow = friends.length - max;
+  return (
+    <div className="flex flex-wrap gap-2 items-center">
+      {shown.map(f => <FriendBubble key={f.id} friend={f}/>)}
+      {overflow > 0 && (
+        <div className="w-9 h-9 rounded-full bg-white/5 ring-1 ring-white/10 flex items-center justify-center" title={`+${overflow} more`}>
+          <span className="text-[10px] font-bold text-white/40">+{overflow}</span>
+        </div>
+      )}
+    </div>
+  );
+};
 
 // Reusable member avatar — shows initials on broken/missing image
 const AVATAR_COLORS = ['#7c3aed','#2563eb','#059669','#d97706','#dc2626','#db2777','#0891b2','#9333ea'];
@@ -1031,6 +1252,18 @@ export default function App() {
   
   const [showAchievementsModal, setShowAchievementsModal] = useState(false);
   const [showRecentAchievements, setShowRecentAchievements] = useState(false);
+  const [showProgressModal, setShowProgressModal] = useState(false);
+  const [cardTooltip, setCardTooltip] = useState<{ title: string; x: number; y: number } | null>(null);
+  const cardTooltipTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showCardTooltip = (title: string, x: number, y: number) => {
+    if (cardTooltipTimer.current) clearTimeout(cardTooltipTimer.current);
+    cardTooltipTimer.current = setTimeout(() => setCardTooltip({ title, x, y }), 1000);
+  };
+  const hideCardTooltip = () => {
+    if (cardTooltipTimer.current) clearTimeout(cardTooltipTimer.current);
+    setCardTooltip(null);
+  };
+  const [companionProgress, setCompanionProgress] = useState<Record<number, any[]>>({});
   const [isEditingArtwork, setIsEditingArtwork] = useState(false);
   const [editingArtworkType, setEditingArtworkType] = useState<'artwork' |'banner' |'logo'>('artwork');
   const [customArtworkUrl, setCustomArtworkUrl] = useState('');
@@ -1062,8 +1295,10 @@ export default function App() {
   const [showSteamLinkModal, setShowSteamLinkModal] = useState(false);
   const [steamLinkInput, setSteamLinkInput] = useState('');
   const [showDiscordGuildPicker, setShowDiscordGuildPicker] = useState(false);
-  const [discordGuilds, setDiscordGuilds] = useState<{id: string, name: string, icon: string | null}[]>([]);
-  const [discordGuildsLoading, setDiscordGuildsLoading] = useState(false);
+  const [discordGuildInput, setDiscordGuildInput] = useState('');
+  const [discordGuildPreview, setDiscordGuildPreview] = useState<{id: string, name: string, icon_url: string | null, approximate_member_count?: number} | null>(null);
+  const [discordGuildResolving, setDiscordGuildResolving] = useState(false);
+  const [discordGuildError, setDiscordGuildError] = useState<string | null>(null);
   const [syncMessage, setSyncMessage] = useState<{title: string, message: string, type:'error' |'success' |'info'} | null>(null);
   const [showQuestlogFriends, setShowQuestlogFriends] = useState(false);
   const [appFriends, setAppFriends] = useState<{id: number; username: string; avatar?: string; online_status?: string; current_game?: string}[]>([]);
@@ -1099,6 +1334,7 @@ export default function App() {
   const [showSharePanel, setShowSharePanel] = useState(false);
   const [shareGameData, setShareGameData] = useState<{title: string; steamAppID?: string; igdbSlug?: string; artwork?: string} | null>(null);
   const [shareTargetFriend, setShareTargetFriend] = useState<number | null>(null);
+  const [shareTargetGroup, setShareTargetGroup] = useState<number | null>(null);
   const [shareMessageText, setShareMessageText] = useState('');
   const [shareCopied, setShareCopied] = useState(false);
   const [activityPrivate, setActivityPrivate] = useState(false);
@@ -1334,8 +1570,7 @@ export default function App() {
     
     const allGames = [
       ...homeData.recentlyPlayed,
-      ...homeData.suggestedLibrary,
-      ...homeData.suggestedLog
+      ...(homeData.pickedForYou ?? [])
     ];
     
     const uniqueGames = Array.from(new Map(allGames.map(g => [g.id + (('platform' in g) ?'l' :'g'), g])).values());
@@ -1402,7 +1637,6 @@ export default function App() {
       }
     } catch {}
   }, []);
-  const [loadingActivityId] = useState<string | null>(null);
   const [isHomeLoading, setIsHomeLoading] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [groupActionsOpen, setGroupActionsOpen] = useState(false);
@@ -1420,6 +1654,9 @@ export default function App() {
   const [isEditingTags, setIsEditingTags] = useState(false);
   const [newTagInput, setNewTagInput] = useState('');
   const [showStatsDetail, setShowStatsDetail] = useState<'library' |'playtime' |'backlog' | null>(null);
+  const homeSidebarRef = React.useRef<HTMLDivElement | null>(null);
+  const homeGridRef = React.useRef<HTMLDivElement | null>(null);
+  const friendsActivityRef = React.useRef<HTMLDivElement | null>(null);
   const [playtimeChartTab, setPlaytimeChartTab] = useState<'7d' | '30d'>('7d');
   const [revealTotalHours, setRevealTotalHours] = useState(false);
   const [friendsLibraryStats, setFriendsLibraryStats] = useState<Record<number, { libraryCount: number; genreStats: {genre: string; count: number}[]; platformStats: {platform: string; count: number}[]; tagStats: {tag: string; count: number}[]; topGame?: { title: string; playtime: number }; recentGame?: { title: string } }>>({});
@@ -1576,6 +1813,17 @@ export default function App() {
     }
   }, [currentTab, token]);
 
+
+  // Clear any inline sidebar styles left over from a previous session
+  useEffect(() => {
+    const sidebar = homeSidebarRef.current;
+    if (sidebar) {
+      sidebar.style.transform = '';
+      sidebar.style.position = '';
+      sidebar.style.top = '';
+    }
+  }, [currentTab]);
+
   // Fetch friends' library stats when library popup opens
   useEffect(() => {
     if (showStatsDetail !== 'library' || !token || appFriends.length === 0) return;
@@ -1700,12 +1948,15 @@ export default function App() {
               try {
                 const info = await fetchGameInfo(game.title, game.steamAppID);
                 activityMetaCache.current.set(game.id, { ...info, _cachedAt: Date.now() });
-                const obj: any = {};
-                activityMetaCache.current.forEach((v, k) => { obj[k] = v; });
-                sessionStorage.setItem('ql_activity_meta', JSON.stringify(obj));
               } catch {}
               await new Promise(r => setTimeout(r, 600));
             }
+            // Persist cache once after all fetches complete, not on every iteration
+            try {
+              const obj: any = {};
+              activityMetaCache.current.forEach((v, k) => { obj[k] = v; });
+              sessionStorage.setItem('ql_activity_meta', JSON.stringify(obj));
+            } catch {}
           })();
         }
       }
@@ -1909,7 +2160,15 @@ export default function App() {
   const sendGameToFriend = async (friendId: number, game: {title: string; steamAppID?: string; artwork?: string}, message?: string) => {
     try {
       await remoteSendMessage(friendId, message || undefined, { game_title: game.title, game_artwork: game.artwork || '', steam_app_id: game.steamAppID });
-      setShowSharePanel(false); setShareTargetFriend(null); setShareMessageText(''); setShareGameData(null);
+      setShowSharePanel(false); setShareTargetFriend(null); setShareTargetGroup(null); setShareMessageText(''); setShareGameData(null);
+    } catch {}
+  };
+
+  const sendGameToGroup = async (groupId: number, game: {title: string; steamAppID?: string; artwork?: string}, message?: string) => {
+    try {
+      const payload = JSON.stringify({ title: game.title, artwork: game.artwork || '', steamAppId: game.steamAppID || '', message: message || null });
+      await remoteSendGroupMessage(groupId, `[GAME_SHARE]${payload}`);
+      setShowSharePanel(false); setShareTargetFriend(null); setShareTargetGroup(null); setShareMessageText(''); setShareGameData(null);
     } catch {}
   };
 
@@ -2871,22 +3130,39 @@ export default function App() {
     }
   };
 
-  const handleOpenDiscordGuildPicker = async () => {
+  const handleOpenDiscordGuildPicker = () => {
     setShowDiscordGuildPicker(true);
-    setDiscordGuildsLoading(true);
-    try {
-      const res = await fetch('/api/user/discord-guilds', { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) setDiscordGuilds(await res.json());
-      else setDiscordGuilds([]);
-    } catch { setDiscordGuilds([]); }
-    setDiscordGuildsLoading(false);
+    setDiscordGuildInput('');
+    setDiscordGuildPreview(null);
+    setDiscordGuildError(null);
   };
 
-  const handleSelectDiscordGuild = async (guildId: string) => {
+  const handleResolveDiscordInvite = async () => {
+    if (!discordGuildInput.trim()) return;
+    setDiscordGuildResolving(true);
+    setDiscordGuildError(null);
+    setDiscordGuildPreview(null);
+    try {
+      const res = await fetch('/api/user/discord-guild/resolve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ invite: discordGuildInput.trim() })
+      });
+      if (res.ok) {
+        setDiscordGuildPreview(await res.json());
+      } else {
+        const err = await res.json();
+        setDiscordGuildError(err.error || 'Invalid invite');
+      }
+    } catch { setDiscordGuildError('Failed to resolve invite'); }
+    setDiscordGuildResolving(false);
+  };
+
+  const handleSelectDiscordGuild = async (guildId: string, guildName?: string, guildIcon?: string) => {
     await fetch('/api/user/discord-guild', {
-      method:'PATCH',
-      headers: {'Content-Type':'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ guild_id: guildId })
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ guild_id: guildId, guild_name: guildName, guild_icon: guildIcon })
     });
     setShowDiscordGuildPicker(false);
     fetchHomeData();
@@ -3847,7 +4123,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-12">
+      <main className="max-w-7xl mx-auto px-6 pt-6 pb-12">
         {currentTab ==='home' ? (
           <div className="space-y-8">
             <section className="relative h-[400px] rounded-[40px] overflow-hidden group">
@@ -3902,296 +4178,701 @@ export default function App() {
             </section>
 
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
+            <div ref={homeGridRef} className="grid grid-cols-1 lg:grid-cols-12 gap-10">
               <div className="lg:col-span-8 space-y-10">
                 <HorizontalScrollRow title="Jump Back In" icon={<Clock size={12} className="text-emerald-500/60"/>}>
-                  {homeData?.recentlyPlayed?.map((game) => (
-                    <motion.div key={game.id} whileHover={{ y: -5 }} onClick={() => { setSelectedGame(game as any); fetchLauncherGameDetails(game.id); }}
-                      className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
->
-                      <CachedImg proxyUrl={getSteamHorizontalArtwork(game, artworkRefreshKey)} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.03]" alt={game.title} onError={(e) => {
-                          const target = e.target as HTMLImageElement;
-                          if (!target.src.includes(getBannerUrl(game))) {
-                            target.src = getBannerUrl(game);
-                          }
-                        }}
-/>
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-                        <div className="absolute bottom-4 left-4 right-4">
-                          <h3 className="text-sm font-bold text-white mb-1 line-clamp-1">{game.title}</h3>
-                          <div className="flex items-center gap-3 text-white/60 text-[10px] font-medium">
-                            <span className="flex items-center gap-1">
-                              <Clock size={10}/>
-                              {Math.round(game.playtime/ 60)}h
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </motion.div>
-                  ))}
+                  {[...(homeData?.recentlyPlayed ?? [])]
+                    .filter(g => g.id !== homeData?.recentlyPlayed?.[0]?.id && !isPartyGame(g))
+                    .sort((a, b) => scoreJumpBackIn(b) - scoreJumpBackIn(a))
+                    .map((game) => {
+                      const ach = parseAchievements(game);
+                      const achPct = ach ? ach.unlocked / ach.total : null;
+                      const hpct = isProgressGame(game) ? hltbProgress(game) : null;
+                      // Playtime bar: soft-cap at 3000 min (50h), shown only if game has been played
+                      const playtimePct = (game.playtime ?? 0) > 0 ? Math.min(1, game.playtime / 3000) : null;
+                      // Priority: achievements → HLTB → raw playtime
+                      const pct = achPct ?? hpct ?? playtimePct;
+                      const barType = achPct !== null ? 'ach' : hpct !== null ? 'hltb' : 'time';
+                      const tag = jumpBackInTag(game);
+                      return (
+                        <motion.div key={game.id} whileHover={{ y: -5 }}
+                          onClick={() => { setSelectedGame(game as any); fetchLauncherGameDetails(game.id); }}
+                          onMouseEnter={(e) => showCardTooltip(game.title, e.clientX, e.clientY)}
+                          onMouseLeave={hideCardTooltip}
+                          className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
+                        >
+                            <CachedImg proxyUrl={getSteamHorizontalArtwork(game, artworkRefreshKey)} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.03]" alt={game.title}
+                              onError={(e) => { const t = e.target as HTMLImageElement; if (!t.src.includes(getBannerUrl(game))) t.src = getBannerUrl(game); }}
+                            />
+                            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200" style={{ background: 'radial-gradient(ellipse at top left, rgba(0,0,0,0.55) 0%, transparent 65%)' }}/>
+                            <div className="absolute top-2.5 left-3 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                              <p className={cn('text-[8px] font-bold uppercase tracking-widest mb-1', tag.color)}>{tag.label}</p>
+                              {pct !== null && (
+                                <div className="flex items-center gap-1.5">
+                                  <div className="relative h-[3px] w-14 rounded-full overflow-hidden bg-white/15">
+                                    <div className="absolute inset-y-0 left-0 rounded-full"
+                                      style={{
+                                        width: `${pct * 100}%`,
+                                        background: barType === 'ach'  ? 'linear-gradient(90deg, #10b981, #06b6d4)'
+                                                 : barType === 'hltb' ? 'linear-gradient(90deg, #6366f1, #8b5cf6)'
+                                                 :                       'linear-gradient(90deg, #f59e0b, #f97316)',
+                                        boxShadow: barType === 'ach'  ? '0 0 5px rgba(16,185,129,0.6)'
+                                                 : barType === 'hltb' ? '0 0 5px rgba(99,102,241,0.6)'
+                                                 :                       '0 0 5px rgba(245,158,11,0.5)',
+                                      }}
+                                    />
+                                    {[0.25, 0.5, 0.75].map(mark => (
+                                      <div key={mark} className="absolute inset-y-0 w-px bg-black/40" style={{ left: `${mark * 100}%` }}/>
+                                    ))}
+                                  </div>
+                                  {barType === 'time' ? (
+                                    <span className="text-[8px] font-bold text-amber-400/80">
+                                      {game.playtime >= 60 ? `${Math.round(game.playtime / 60)}h` : `${game.playtime}m`}
+                                    </span>
+                                  ) : (
+                                    <span className="text-[8px] font-bold" style={{ color: barType === 'hltb' ? `hsl(${250 + pct * 30}, 70%, 70%)` : `hsl(${140 * pct}, 80%, 60%)` }}>
+                                      {Math.round(pct * 100)}%
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                        </motion.div>
+                      );
+                    })}
                 </HorizontalScrollRow>
 
-                <HorizontalScrollRow title="Suggested from Library" icon={<Library size={12} className="text-blue-500/60"/>}>
-                  {homeData?.suggestedLibrary?.map((game) => (
-                    <motion.div key={game.id} whileHover={{ y: -5 }} onClick={() => { setSelectedGame(game as any); fetchLauncherGameDetails(game.id); }}
-                      className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
->
-                      <CachedImg proxyUrl={getSteamHorizontalArtwork(game, artworkRefreshKey)} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]" alt={game.title} onError={(e) => {
-                          const target = e.target as HTMLImageElement;
-                          if (!target.src.includes(getBannerUrl(game))) {
-                            target.src = getBannerUrl(game);
-                          }
+                <HorizontalScrollRow title="Picked for You" icon={<Sparkles size={12} className="text-amber-400/60"/>}>
+                  {homeData?.pickedForYou?.map((game) => {
+                    const tags = (game.matchedTags ?? []).slice(0, 3);
+                    const isLibrary = game._source === 'library';
+                    return (
+                      <motion.div key={`${game._source}-${game.id}`} whileHover={{ y: -5 }}
+                        onClick={() => {
+                          setSelectedGame(game as any);
+                          if (isLibrary) fetchLauncherGameDetails(game.id);
+                          else fetchQuestlogFriends(game as any);
                         }}
-/>
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-                        <div className="absolute bottom-4 left-4 right-4">
-                          <h3 className="text-sm font-bold text-white mb-1 line-clamp-1">{game.title}</h3>
-                          <div className="flex items-center gap-3 text-white/60 text-[10px] font-medium">
-                            <span className="flex items-center gap-1">
-                              <Clock size={10}/>
-                              {Math.round(game.playtime/ 60)}h
-                            </span>
-                          </div>
+                        onMouseEnter={(e) => showCardTooltip(game.title, e.clientX, e.clientY)}
+                        onMouseLeave={hideCardTooltip}
+                        className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
+                      >
+                        <CachedImg proxyUrl={getSteamHorizontalArtwork(game, artworkRefreshKey)} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.03]" alt={game.title}
+                          onError={(e) => { const t = e.target as HTMLImageElement; if (!t.src.includes(getBannerUrl(game))) t.src = getBannerUrl(game); }}
+                        />
+                        <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200" style={{ background: 'radial-gradient(ellipse at top left, rgba(0,0,0,0.6) 0%, transparent 65%)' }}/>
+                        <div className="absolute top-2.5 left-3 flex flex-wrap gap-1 items-center opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                          <span className={cn('flex items-center justify-center w-5 h-5 rounded-full',
+                            isLibrary ? 'bg-blue-500 text-white' : 'bg-purple-500 text-white'
+                          )}>
+                            {isLibrary ? <Library size={10}/> : <Gamepad2 size={10}/>}
+                          </span>
+                          {tags.map((tag, i) => (
+                            <span key={tag} className={cn('text-[7px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full',
+                              i === 0 ? 'bg-emerald-500/25 text-emerald-300' :
+                              i === 1 ? 'bg-amber-500/25 text-amber-300' :
+                                        'bg-rose-500/25 text-rose-300'
+                            )}>{tag}</span>
+                          ))}
                         </div>
-                      </div>
-                    </motion.div>
-                  ))}
-                </HorizontalScrollRow>
-
-                <HorizontalScrollRow title="Suggested from Log" icon={<Gamepad2 size={12} className="text-purple-500/60"/>}>
-                  {homeData?.suggestedLog?.map((game) => (
-                    <motion.div key={game.id} whileHover={{ y: -5 }} onClick={() => { setSelectedGame(game as any); fetchQuestlogFriends(game as any); }}
-                      className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
->
-                      <CachedImg proxyUrl={getSteamHorizontalArtwork(game, artworkRefreshKey)} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]" alt={game.title} onError={(e) => {
-                          const target = e.target as HTMLImageElement;
-                          if (!target.src.includes(getBannerUrl(game))) {
-                            target.src = getBannerUrl(game);
-                          }
-                        }}
-/>
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-                        <div className="absolute bottom-4 left-4 right-4">
-                          <h3 className="text-sm font-bold text-white mb-1 line-clamp-1">{game.title}</h3>
-                          <div className="flex items-center gap-3 text-white/60 text-[10px] font-medium">
-                            <span className="flex items-center gap-1 text-emerald-500">
-                              <Tag size={10}/>
-                              {game.genre}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </motion.div>
-                  ))}
+                      </motion.div>
+                    );
+                  })}
                 </HorizontalScrollRow>
 
                 {/* Friends Activity */}
-                {homeData?.friendsActivity && homeData.friendsActivity.length > 0 && (
-                  <HorizontalScrollRow title="Friends Activity" icon={<Users size={12} className="text-blue-400/60"/>}>
-                    {homeData.friendsActivity.map((game) => (
-                      <ExternalGameCard key={game.id} game={game} onClick={() => handleFriendActivityClick(game)} />
-                    ))}
-                  </HorizontalScrollRow>
-                )}
+                {homeData?.friendsActivity && homeData.friendsActivity.length > 0 && (() => {
+                  const ncA = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+                  const allOnline = [
+                    ...(homeData.friendsOnline?.steam ?? []),
+                    ...(homeData.friendsOnline?.xbox ?? []),
+                    ...(homeData.friendsOnline?.epic ?? []),
+                    ...(homeData.friendsOnline?.discord ?? []),
+                    ...(homeData.friendsOnline?.app ?? []),
+                  ];
+                  const liveGames = new Set(allOnline.filter(f => f.current_game).map(f => ncA(f.current_game!)));
+                  type ActivityGroup = {
+                    game: DiscoverGame;
+                    friends: { name: string; avatar: string; playedAt?: string }[];
+                    isLive: boolean;
+                    matchedLibraryId: number | null;
+                    matchedQuestlogId: number | null;
+                  };
+                  const groups = new Map<string, ActivityGroup>();
+                  for (const item of homeData.friendsActivity) {
+                    const key = ncA(item.title);
+                    if (!groups.has(key)) {
+                      groups.set(key, {
+                        game: item,
+                        friends: [],
+                        isLive: liveGames.has(key),
+                        matchedLibraryId: item.matchedLibraryId ?? null,
+                        matchedQuestlogId: item.matchedQuestlogId ?? null,
+                      });
+                    }
+                    const grp = groups.get(key)!;
+                    if (item.friendName) {
+                      grp.friends.push({ name: item.friendName, avatar: item.friendAvatar || '', playedAt: item.lastPlayed });
+                    }
+                  }
+                  const sorted = [...groups.values()].sort((a, b) => {
+                    if (a.isLive !== b.isLive) return a.isLive ? -1 : 1;
+                    return b.friends.length - a.friends.length;
+                  });
+                  function fmtTime(ts: string | undefined): string | null {
+                    if (!ts) return null;
+                    const ms = new Date(ts).getTime();
+                    if (isNaN(ms) || ms <= 0) return null;
+                    const days = Math.floor((Date.now() - ms) / 86400000);
+                    if (days === 0) return 'Today';
+                    if (days === 1) return 'Yesterday';
+                    if (days < 7) return `${days}d ago`;
+                    if (days < 30) return `${Math.floor(days / 7)}w ago`;
+                    return `${Math.floor(days / 30)}mo ago`;
+                  }
+                  return (
+                    <div ref={friendsActivityRef}>
+                      <HorizontalScrollRow title="Friends Activity" icon={<Users size={12} className="text-blue-400/60"/>}>
+                        {sorted.map((group) => {
+                          const { game, friends, isLive, matchedLibraryId, matchedQuestlogId } = group;
+                          const shown = friends.slice(0, 3);
+                          const extra = friends.length - 3;
+                          const steamAppID = game.steamAppID;
+                          const proxyUrl = steamAppID
+                            ? `/api/steamgriddb/horizontal/${steamAppID}`
+                            : `/api/steamgriddb/horizontal-by-name/${encodeURIComponent(game.title)}`;
+                          return (
+                            <motion.div key={game.id} whileHover={{ y: -5 }}
+                              onClick={() => handleFriendActivityClick(game)}
+                              onMouseEnter={(e) => showCardTooltip(game.title, e.clientX, e.clientY)}
+                              onMouseLeave={hideCardTooltip}
+                              className="group relative w-[calc(50%-0.5rem)] aspect-[92/43] rounded-2xl overflow-hidden cursor-pointer ring-1 ring-white/5 bg-white/5 snap-start shrink-0"
+                            >
+                                <CachedImg proxyUrl={proxyUrl} alt={game.title}
+                                  className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+                                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                />
+                                <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200" style={{ background: 'radial-gradient(ellipse at top left, rgba(0,0,0,0.65) 0%, transparent 65%)' }}/>
+                                <div className="absolute top-2.5 left-3 flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                                  <span className={cn('flex items-center justify-center w-5 h-5 rounded-full shrink-0',
+                                    matchedLibraryId ? 'bg-blue-500 text-white' :
+                                    matchedQuestlogId ? 'bg-purple-500 text-white' :
+                                    'bg-white/20 text-white/60'
+                                  )}>
+                                    {matchedLibraryId ? <Library size={10}/> :
+                                     matchedQuestlogId ? <Gamepad2 size={10}/> :
+                                     <Sparkles size={10}/>}
+                                  </span>
+                                  {friends.slice(0, 2).map((f) => (
+                                    <div key={f.name} className="flex items-center gap-1">
+                                      <div className="w-5 h-5 rounded-full border border-black/60 overflow-hidden shrink-0">
+                                        <img src={f.avatar} alt={f.name} className="w-full h-full object-cover" referrerPolicy="no-referrer"
+                                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                        />
+                                      </div>
+                                      <span className="text-[8px] font-semibold text-white/80 leading-none whitespace-nowrap">{f.name}</span>
+                                    </div>
+                                  ))}
+                                  {friends.length > 2 && (
+                                    <span className="text-[7px] text-white/40 leading-none">+{friends.length - 2}</span>
+                                  )}
+                                  {isLive && (
+                                    <span className="flex items-center gap-1 bg-emerald-500/20 text-emerald-400 text-[7px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block"/>
+                                      Live
+                                    </span>
+                                  )}
+                                </div>
+                            </motion.div>
+                          );
+                        })}
+                      </HorizontalScrollRow>
+                    </div>
+                  );
+                })()}
 
               </div>
 
-              <div className="lg:col-span-4 flex flex-col gap-6 sticky top-24 self-stretch">
-                <section className="bg-white/5 rounded-[32px] p-8 border border-white/10 max-h-[60vh] overflow-y-auto custom-scrollbar">
-                  <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
-                    <Users size={20} className="text-blue-500"/>
+              <div ref={homeSidebarRef} className="lg:col-span-4 flex flex-col gap-10">
+                <section>
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-white/50 mb-5 flex items-center gap-2.5">
+                    <Users size={12} className="text-blue-500"/>
                     Friends Online
                   </h3>
 
-                  {/* Steam */}
-                  <div className="mb-6">
-                    <div className="flex items-center gap-2 mb-3">
-                      <SteamIcon className="w-3 h-3 text-white/30"/>
-                      <span className="text-[10px] font-mono uppercase tracking-widest text-white/30">Steam</span>
-                    </div>
-                    {user?.steam_id ? (
-                      <div className="space-y-4">
-                        {(homeData?.friendsOnline?.steam?.filter(f => f.online_status ==='online') ?? []).slice(0, 5).map(friend => (
-                          <FriendRow key={friend.id} friend={friend}/>
-                        ))}
-                        {(homeData?.friendsOnline?.steam?.filter(f => f.online_status ==='online') ?? []).length === 0 && (
-                          <p className="text-xs text-white/20 italic">No Steam friends online</p>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="flex items-center justify-between p-4 rounded-2xl bg-black/20 border border-white/5 cursor-pointer hover:bg-white/5 transition-colors" onClick={() => setShowSteamLinkModal(true)}>
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 rounded-lg bg-[#171a21] flex items-center justify-center">
-                            <SteamIcon className="w-5 h-5 text-white/40"/>
-                          </div>
-                          <span className="text-xs font-bold text-white/40">Connect Steam</span>
-                        </div>
-                        <Plus size={16} className="text-white/20"/>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Xbox */}
-                  <div className="mb-6">
-                    <div className="flex items-center gap-2 mb-3">
-                      <XboxIcon className="w-3 h-3 text-white/30"/>
-                      <span className="text-[10px] font-mono uppercase tracking-widest text-white/30">Xbox</span>
-                    </div>
-                    {user?.xbox_id ? (
-                      <div className="space-y-4">
-                        {(homeData?.friendsOnline?.xbox?.filter(f => f.online_status ==='online') ?? []).slice(0, 5).map(friend => (
-                          <FriendRow key={friend.id} friend={friend}/>
-                        ))}
-                        {(homeData?.friendsOnline?.xbox?.filter(f => f.online_status ==='online') ?? []).length === 0 && (
-                          <p className="text-xs text-white/20 italic">No Xbox friends online</p>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="flex items-center justify-between p-4 rounded-2xl bg-black/20 border border-white/5 cursor-pointer hover:bg-white/5 transition-colors" onClick={handleSyncXbox}>
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 rounded-lg bg-[#107c10]/40 flex items-center justify-center">
-                            <XboxIcon className="w-5 h-5 text-white/40"/>
-                          </div>
-                          <span className="text-xs font-bold text-white/40">Connect Xbox</span>
-                        </div>
-                        <Plus size={16} className="text-white/20"/>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Discord */}
-                  <div>
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center gap-2">
-                        <DiscordIcon className="w-3 h-3 text-white/30"/>
-                        <span className="text-[10px] font-mono uppercase tracking-widest text-white/30">Discord</span>
-                      </div>
-                      {user?.discord_id && (
-                        <button onClick={handleOpenDiscordGuildPicker} className="text-[10px] font-bold uppercase tracking-widest text-white/30 hover:text-white/70 transition-colors">
-                          {homeData?.discordGuildId ?'Change Server' :'Pick Server'}
+                  <div className="space-y-6">
+                    {/* Steam */}
+                    <div className="flex items-center gap-4 min-h-[36px]">
+                      <SteamIcon className="w-6 h-6 text-white/20 shrink-0"/>
+                      {user?.steam_id ? (
+                        (() => { const online = (homeData?.friendsOnline?.steam ?? []).filter(f => f.online_status === 'online'); return online.length > 0
+                          ? <FriendBubbles friends={online}/>
+                          : <p className="text-[10px] text-white/20 italic">No one online</p>; })()
+                      ) : (
+                        <button onClick={() => setShowSteamLinkModal(true)} className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-white/20 hover:text-white/50 transition-colors cursor-pointer">
+                          <Plus size={9}/> Connect
                         </button>
                       )}
                     </div>
-                    {user?.discord_id ? (
-                      !homeData?.discordGuildId ? (
-                        <div className="flex items-center justify-between p-4 rounded-2xl bg-black/20 border border-white/5 cursor-pointer hover:bg-white/5 transition-colors" onClick={handleOpenDiscordGuildPicker}>
-                          <div className="flex items-center gap-3">
-                            <div className="w-8 h-8 rounded-lg bg-[#5865F2]/20 flex items-center justify-center">
-                              <DiscordIcon className="w-5 h-5 text-white/40"/>
-                            </div>
-                            <span className="text-xs font-bold text-white/40">Select a server</span>
-                          </div>
-                          <Plus size={16} className="text-white/20"/>
+
+                    {/* Xbox */}
+                    <div className="flex items-center gap-4 min-h-[36px]">
+                      <XboxIcon className="w-6 h-6 text-white/20 shrink-0"/>
+                      {user?.xbox_id ? (
+                        (() => { const online = (homeData?.friendsOnline?.xbox ?? []).filter(f => f.online_status === 'online'); return online.length > 0
+                          ? <FriendBubbles friends={online}/>
+                          : <p className="text-[10px] text-white/20 italic">No one online</p>; })()
+                      ) : (
+                        <button onClick={handleSyncXbox} className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-white/20 hover:text-white/50 transition-colors cursor-pointer">
+                          <Plus size={9}/> Connect
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Epic */}
+                    <div className="flex items-center gap-4 min-h-[36px]">
+                      <EpicIcon className="w-6 h-6 text-white/20 shrink-0"/>
+                      {user?.epic_account_id ? (
+                        (homeData?.friendsOnline?.epic ?? []).length > 0
+                          ? <FriendBubbles friends={homeData.friendsOnline.epic}/>
+                          : <p className="text-[10px] text-white/20 italic">No one online</p>
+                      ) : (
+                        <button onClick={handleSyncEpic} className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-white/20 hover:text-white/50 transition-colors cursor-pointer">
+                          <Plus size={9}/> Connect
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Discord */}
+                    <div className="flex items-center gap-4 min-h-[36px]">
+                      <DiscordIcon className="w-6 h-6 text-white/20 shrink-0"/>
+                      {!user?.discord_id ? (
+                        <button onClick={() => handleLinkProfile('discord')} className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-white/20 hover:text-white/50 transition-colors cursor-pointer">
+                          <Plus size={9}/> Connect
+                        </button>
+                      ) : !homeData?.discordGuildId ? (
+                        <button onClick={handleOpenDiscordGuildPicker} className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-white/20 hover:text-white/50 transition-colors cursor-pointer">
+                          <Plus size={9}/> Pick a server
+                        </button>
+                      ) : !homeData?.discordGuildCached ? (
+                        <button onClick={handleOpenDiscordGuildPicker} className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-[#5865F2]/50 hover:text-[#5865F2] transition-colors cursor-pointer">
+                          <Plus size={9}/> Invite bot for presence
+                        </button>
+                      ) : (homeData.friendsOnline?.discord ?? []).length > 0 ? (
+                        <div className="flex-1 min-w-0">
+                          <FriendBubbles friends={homeData.friendsOnline.discord} max={8}/>
                         </div>
                       ) : (
-                        <div className="space-y-4">
-                          {(homeData?.friendsOnline?.discord ?? []).slice(0, 6).map(friend => (
-                            <FriendRow key={friend.id} friend={friend} showStatus={false}/>
-                          ))}
-                          {(homeData?.friendsOnline?.discord ?? []).length === 0 && (
-                            <p className="text-xs text-white/20 italic">No members found</p>
-                          )}
-                        </div>
-                      )
-                    ) : (
-                      <div className="flex items-center justify-between p-4 rounded-2xl bg-black/20 border border-white/5 cursor-pointer hover:bg-white/5 transition-colors" onClick={() => handleLinkProfile('discord')}>
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 rounded-lg bg-[#5865F2] flex items-center justify-center">
-                            <DiscordIcon className="w-5 h-5 text-white/40"/>
-                          </div>
-                          <span className="text-xs font-bold text-white/40">Connect Discord</span>
-                        </div>
-                        <Plus size={16} className="text-white/20"/>
-                      </div>
-                    )}
+                        <p className="text-[10px] text-white/20 italic">No one online</p>
+                      )}
+                      {user?.discord_id && homeData?.discordGuildId && (
+                        <button onClick={handleOpenDiscordGuildPicker} className="ml-auto text-[9px] font-bold uppercase tracking-widest text-white/15 hover:text-white/40 transition-colors cursor-pointer shrink-0">
+                          Change
+                        </button>
+                      )}
+                    </div>
                   </div>
-
                 </section>
 
-                <section>
-                  <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
-                    <Activity size={20} className="text-emerald-500"/>
+                <section className="flex-1 flex flex-col">
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-white/50 mb-6 flex items-center gap-2.5">
+                    <Activity size={12} className="text-emerald-500"/>
                     Quick Stats
                   </h3>
-                  <div className="grid grid-cols-2 gap-4">
-                    <button onClick={() => setShowStatsDetail('library')}
-                      className="p-6 bg-blue-500/10 border border-blue-500/20 rounded-3xl text-left hover:bg-blue-500/20 transition-all group"
->
-                      <Library className="text-blue-500 mb-4 group-hover:scale-[1.03] transition-transform"/>
-                      <div className="text-2xl font-black">{homeData?.stats?.libraryCount}</div>
-                      <div className="text-xs font-bold text-blue-500/60 uppercase tracking-widest">Library</div>
-                    </button>
-                    <button onClick={() => { setShowStatsDetail('playtime'); setRevealTotalHours(false); }}
-                      className="p-6 bg-emerald-500/10 border border-emerald-500/20 rounded-3xl text-left hover:bg-emerald-500/20 transition-all group"
->
-                      <Clock className="text-emerald-500 mb-3 group-hover:scale-[1.03] transition-transform"/>
-                      <div className="text-2xl font-black">{homeData?.stats?.weeklyPlaytimeHours ?? 0}h</div>
-                      <div className="text-xs font-bold text-emerald-500/60 uppercase tracking-widest">This Week</div>
-                    </button>
-                    <button onClick={() => setShowStatsDetail('backlog')}
-                      className="p-6 bg-purple-500/10 border border-purple-500/20 rounded-3xl text-left hover:bg-purple-500/20 transition-all group"
->
-                      <Gamepad2 className="text-purple-500 mb-4 group-hover:scale-[1.03] transition-transform"/>
-                      <div className="text-2xl font-black">{homeData?.stats?.backlogCount}</div>
-                      <div className="text-xs font-bold text-purple-500/60 uppercase tracking-widest">Backlog</div>
-                    </button>
-                    <button onClick={() => setShowRecentAchievements(true)}
-                      className="p-6 bg-orange-500/10 border border-orange-500/20 rounded-3xl text-left hover:bg-orange-500/20 transition-all group"
->
-                      <Trophy className="text-orange-500 mb-4 group-hover:scale-[1.03] transition-transform"/>
-                      <div className="text-2xl font-black">{homeData?.recentAchievements?.length}</div>
-                      <div className="text-xs font-bold text-orange-500/60 uppercase tracking-widest">Achievements</div>
-                    </button>
-                  </div>
-                </section>
-
-                <section className="mt-auto bg-white/5 rounded-[32px] p-8 border border-white/10">
-                  <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
-                    <LinkIcon size={20} className="text-orange-500"/>
-                    Connected Accounts
-                  </h3>
-                  <div className="space-y-4">
-                    <div className={`flex items-center justify-between p-4 rounded-2xl bg-black/20 border border-white/5 transition-colors ${!user?.steam_id ?'cursor-pointer hover:bg-white/5' :''}`} onClick={() => !user?.steam_id && handleLinkProfile('steam')}>
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-[#171a21] flex items-center justify-center">
-                          <SteamIcon className="w-5 h-5 text-white"/>
-                        </div>
-                        <span className="text-xs font-bold">Steam</span>
-                      </div>
-                      {user?.steam_id ? <CheckCircle2 size={16} className="text-emerald-500"/> : <Plus size={16} className="text-white/20"/>}
+                  <div className="flex-1 flex flex-col gap-4 pb-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <button onClick={() => setShowStatsDetail('library')}
+                        className="p-6 bg-blue-500/10 border border-blue-500/20 rounded-3xl text-left hover:bg-blue-500/20 transition-all group">
+                        <Library className="text-blue-500 mb-4 group-hover:scale-[1.03] transition-transform"/>
+                        <div className="text-2xl font-black">{homeData?.stats?.libraryCount}</div>
+                        <div className="text-xs font-bold text-blue-500/60 uppercase tracking-widest">Library</div>
+                      </button>
+                      <button onClick={() => { setShowStatsDetail('playtime'); setRevealTotalHours(false); }}
+                        className="p-6 bg-emerald-500/10 border border-emerald-500/20 rounded-3xl text-left hover:bg-emerald-500/20 transition-all group">
+                        <Clock className="text-emerald-500 mb-3 group-hover:scale-[1.03] transition-transform"/>
+                        <div className="text-2xl font-black">{homeData?.stats?.weeklyPlaytimeHours ?? 0}h</div>
+                        <div className="text-xs font-bold text-emerald-500/60 uppercase tracking-widest">This Week</div>
+                      </button>
+                      <button onClick={() => setShowStatsDetail('backlog')}
+                        className="p-6 bg-purple-500/10 border border-purple-500/20 rounded-3xl text-left hover:bg-purple-500/20 transition-all group">
+                        <Gamepad2 className="text-purple-500 mb-4 group-hover:scale-[1.03] transition-transform"/>
+                        <div className="text-2xl font-black">{homeData?.stats?.backlogCount}</div>
+                        <div className="text-xs font-bold text-purple-500/60 uppercase tracking-widest">Backlog</div>
+                      </button>
+                      <button onClick={() => setShowRecentAchievements(true)}
+                        className="p-6 bg-orange-500/10 border border-orange-500/20 rounded-3xl text-left hover:bg-orange-500/20 transition-all group">
+                        <Trophy className="text-orange-500 mb-4 group-hover:scale-[1.03] transition-transform"/>
+                        <div className="text-2xl font-black">{homeData?.recentAchievements?.length}</div>
+                        <div className="text-xs font-bold text-orange-500/60 uppercase tracking-widest">Achievements</div>
+                      </button>
                     </div>
-                    <div className={`flex items-center justify-between p-4 rounded-2xl bg-black/20 border border-white/5 transition-colors ${!user?.xbox_id ?'cursor-pointer hover:bg-white/5' :''}`} onClick={() => !user?.xbox_id && handleSyncXbox}>
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-[#107c10] flex items-center justify-center">
-                          <XboxIcon className="w-5 h-5 text-white"/>
+                    <button onClick={() => {
+                      setShowProgressModal(true);
+                      appFriends.forEach(async f => {
+                        if (companionProgress[f.id]) return;
+                        try { setCompanionProgress(p => ({ ...p, [f.id]: [] })); const data = await remoteGetFriendProgress(f.id); setCompanionProgress(p => ({ ...p, [f.id]: data })); } catch {}
+                      });
+                    }}
+                      className="flex-1 w-full px-6 pt-4 pb-6 bg-teal-500/10 border border-teal-500/20 rounded-3xl text-left hover:bg-teal-500/20 transition-all group flex flex-col justify-start">
+                      {/* Header: icon + label top-left, count top-right */}
+                      <div className="flex items-start justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <TrendingUp className="text-teal-500 group-hover:scale-[1.03] transition-transform"/>
+                          <div className="text-xs font-bold text-teal-500/60 uppercase tracking-widest">In Progress</div>
                         </div>
-                        <span className="text-xs font-bold">Xbox</span>
+                        <div className="text-2xl font-black">{(homeData?.recentlyPlayed ?? []).filter(g => (g.playtime ?? 0) > 0).length}</div>
                       </div>
-                      {user?.xbox_id ? <CheckCircle2 size={16} className="text-emerald-500"/> : <Plus size={16} className="text-white/20"/>}
-                    </div>
-                    <div className={`flex items-center justify-between p-4 rounded-2xl bg-black/20 border border-white/5 transition-colors ${!user?.discord_id ?'cursor-pointer hover:bg-white/5' :''}`} onClick={() => !user?.discord_id && handleLinkProfile('discord')}>
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-[#5865F2] flex items-center justify-center">
-                          <DiscordIcon className="w-5 h-5 text-white"/>
-                        </div>
-                        <span className="text-xs font-bold">Discord</span>
+                      {/* Games list — flex-1 so it fills the remaining pill space */}
+                      <div className="flex-1 flex flex-col justify-between">
+                        {(homeData?.recentlyPlayed ?? []).filter(g => (g.playtime ?? 0) > 0).slice(0, 3).map(game => {
+                          const ach = parseAchievements(game);
+                          const achPct = ach ? ach.unlocked / ach.total : null;
+                          const hpct = isProgressGame(game) ? hltbProgress(game) : null;
+                          const pct = achPct ?? hpct ?? Math.min(1, (game.playtime ?? 0) / 3000);
+                          const barType = achPct !== null ? 'ach' : hpct !== null ? 'hltb' : 'time';
+                          const barGrad = barType === 'ach' ? 'linear-gradient(90deg,#10b981,#06b6d4)' : barType === 'hltb' ? 'linear-gradient(90deg,#6366f1,#a855f7)' : 'linear-gradient(90deg,#f59e0b,#f97316)';
+                          const pctColor = barType === 'time' ? '#f59e0b' : barType === 'hltb' ? '#a78bfa' : `hsl(${140 * pct},80%,60%)`;
+                          const steamId = game.platform === 'steam' ? game.external_id : undefined;
+                          return (
+                            <div key={game.id} className="flex items-center gap-2">
+                              <SuggestionThumb steamAppID={steamId} title={game.title} fallbackThumb={game.artwork} size="w-6 h-6"/>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between mb-1">
+                                  <p className="text-[10px] font-semibold truncate text-white/80">{game.title}</p>
+                                  <span className="text-[10px] font-black ml-1.5 shrink-0 tabular-nums" style={{ color: pctColor }}>{Math.round(pct * 100)}%</span>
+                                </div>
+                                <div className="relative h-1.5 rounded-full bg-white/10 overflow-hidden">
+                                  <div className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${pct * 100}%`, background: barGrad }}/>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
-                      {user?.discord_id ? <CheckCircle2 size={16} className="text-emerald-500"/> : <Plus size={16} className="text-white/20"/>}
-                    </div>
-                    <div className={`flex items-center justify-between p-4 rounded-2xl bg-black/20 border border-white/5 transition-colors ${!user?.epic_account_id ?'cursor-pointer hover:bg-white/5' :''}`} onClick={() => !user?.epic_account_id && handleSyncEpic()}>
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-[#0078f2] flex items-center justify-center">
-                          <EpicIcon className="w-5 h-5 text-white"/>
-                        </div>
-                        <span className="text-xs font-bold">Epic Games</span>
-                      </div>
-                      {user?.epic_account_id ? <CheckCircle2 size={16} className="text-emerald-500"/> : <Plus size={16} className="text-white/20"/>}
-                    </div>
+                    </button>
                   </div>
                 </section>
 
               </div>
             </div>
+
+            {/* Progress Modal */}
+            <AnimatePresence>
+              {showProgressModal && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-10">
+                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowProgressModal(false)} className="absolute inset-0 bg-black/85"/>
+                  <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 16 }} transition={{ duration: 0.15 }}
+                    className="relative w-full max-w-3xl bg-[#1a1a1a] rounded-[40px] border border-white/10 overflow-hidden flex flex-col max-h-[90vh]">
+                    <div className="absolute inset-0 pointer-events-none z-10" style={{ boxShadow: 'inset 0 0 50px rgba(0,0,0,0.5)', borderRadius: 'inherit' }}/>
+                    <div className="p-8 border-b border-white/5 flex items-center justify-between">
+                      <h2 className="text-3xl font-bold tracking-tighter uppercase italic font-serif flex items-center gap-3">
+                        <TrendingUp className="text-teal-500" size={24}/>
+                        In Progress
+                      </h2>
+                      <button onClick={() => setShowProgressModal(false)} className="p-2 hover:bg-white/10 rounded-full transition-colors cursor-pointer"><X size={24}/></button>
+                    </div>
+                    <div className="p-8 overflow-y-auto flex-1 space-y-8 custom-scrollbar">
+                      {(() => {
+                        const allStarted = launcherGames.filter(g => (g.playtime ?? 0) > 0);
+                        const withPcts = allStarted.map(game => {
+                          const ach = parseAchievements(game);
+                          const achPct = ach ? ach.unlocked / ach.total : null;
+                          const hpct = isProgressGame(game) ? hltbProgress(game) : null;
+                          // Combo = has achievements AND has HLTB data, OR has achievements AND has playtime (use raw playtime as secondary)
+                          const hasHltbCombo = achPct !== null && hpct !== null;
+                          const hasTimeCombo = achPct !== null && !hpct && (game.playtime ?? 0) > 0;
+                          const hasCombo = hasHltbCombo || hasTimeCombo;
+                          const timePct = Math.min(0.99, (game.playtime ?? 0) / 3000);
+                          const completedByAch = achPct !== null && achPct >= 1;
+                          const completedByHltb = hpct !== null && hpct >= 1;
+                          const isComplete = completedByAch || completedByHltb;
+                          const pct = hasHltbCombo ? (achPct! + hpct!) / 2 : achPct ?? hpct ?? timePct;
+                          const barType = achPct !== null ? 'ach' : hpct !== null ? 'hltb' : 'time';
+                          const steamId = game.platform === 'steam' ? game.external_id : undefined;
+                          const heroBannerUrl = steamId
+                            ? `https://shared.steamstatic.com/store_item_assets/steam/apps/${steamId}/library_hero.jpg`
+                            : game.artwork;
+                          return { game, pct, barType, ach, achPct, hpct, timePct, hasCombo, hasHltbCombo, hasTimeCombo, isComplete, completedByAch, completedByHltb, steamId, heroBannerUrl };
+                        });
+                        const gamePcts = withPcts.filter(g => !g.isComplete).sort((a, b) => b.pct - a.pct);
+                        const completedList = withPcts.filter(g => g.isComplete);
+                        const avgPct = gamePcts.length ? Math.round(gamePcts.reduce((s, g) => s + g.pct, 0) / gamePcts.length * 100) : 0;
+                        const spotlight = gamePcts[0];
+                        const achCount = withPcts.filter(g => g.achPct !== null && !g.isComplete).length;
+                        const hltbCount = withPcts.filter(g => g.hpct !== null && !g.isComplete).length;
+                        const timeCount = withPcts.filter(g => g.barType === 'time' && !g.hasCombo && !g.isComplete).length;
+                        const comboCount = withPcts.filter(g => g.hasCombo && !g.isComplete).length;
+                        const medals = ['🥇','🥈','🥉'];
+
+                        const renderBar = (g: typeof withPcts[0], delay: number, height = 'h-1.5') => {
+                          if (g.hasCombo) {
+                            const secondPct = g.hasHltbCombo ? g.hpct! : g.timePct;
+                            const secondLabel = g.hasHltbCombo ? 'HLTB' : 'Time';
+                            const secondGrad = g.hasHltbCombo ? 'linear-gradient(90deg,#6366f1,#8b5cf6)' : 'linear-gradient(90deg,#f59e0b,#f97316)';
+                            const secondColor = g.hasHltbCombo ? 'text-indigo-400/60' : 'text-amber-400/60';
+                            const secondLabelColor = g.hasHltbCombo ? 'text-indigo-400/50' : 'text-amber-400/50';
+                            return (
+                              <div className="space-y-1">
+                                <div className="flex items-center gap-1.5">
+                                  <span className={`text-[8px] font-bold text-emerald-400/50 w-10 shrink-0`}>Ach</span>
+                                  <div className={`flex-1 ${height} rounded-full overflow-hidden`} style={{ background: 'rgba(255,255,255,0.05)' }}>
+                                    <motion.div initial={{ width: 0 }} animate={{ width: `${g.achPct! * 100}%` }} transition={{ delay: delay + 0.05, duration: 0.6, ease: 'easeOut' }}
+                                      className="h-full rounded-full" style={{ background: 'linear-gradient(90deg,#10b981,#06b6d4)' }}/>
+                                  </div>
+                                  <span className="text-[9px] font-mono text-emerald-400/60 w-8 text-right shrink-0">{Math.round(g.achPct! * 100)}%</span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <span className={`text-[8px] font-bold ${secondLabelColor} w-10 shrink-0`}>{secondLabel}</span>
+                                  <div className={`flex-1 ${height} rounded-full overflow-hidden`} style={{ background: 'rgba(255,255,255,0.05)' }}>
+                                    <motion.div initial={{ width: 0 }} animate={{ width: `${secondPct * 100}%` }} transition={{ delay: delay + 0.1, duration: 0.6, ease: 'easeOut' }}
+                                      className="h-full rounded-full" style={{ background: secondGrad }}/>
+                                  </div>
+                                  <span className={`text-[9px] font-mono ${secondColor} w-8 text-right shrink-0`}>{Math.round(secondPct * 100)}%</span>
+                                </div>
+                              </div>
+                            );
+                          }
+                          const barGrad = g.barType === 'ach' ? 'linear-gradient(90deg,#10b981,#06b6d4)' : g.barType === 'hltb' ? 'linear-gradient(90deg,#6366f1,#8b5cf6)' : 'linear-gradient(90deg,#f59e0b,#f97316)';
+                          const glowColor = g.barType === 'ach' ? 'rgba(16,185,129,0.4)' : g.barType === 'hltb' ? 'rgba(99,102,241,0.4)' : 'rgba(245,158,11,0.4)';
+                          return (
+                            <div className={`${height} rounded-full overflow-hidden`} style={{ background: 'rgba(255,255,255,0.05)' }}>
+                              <motion.div initial={{ width: 0 }} animate={{ width: `${g.pct * 100}%` }} transition={{ delay, duration: 0.6, ease: 'easeOut' }}
+                                className="h-full rounded-full" style={{ background: barGrad, boxShadow: g.pct > 0.5 ? `0 0 6px ${glowColor}` : undefined }}/>
+                            </div>
+                          );
+                        };
+                        return (
+                          <>
+                            {/* Next Finish Line spotlight */}
+                            {spotlight && (
+                              <div className="relative overflow-hidden rounded-3xl border border-teal-500/20 cursor-pointer group/spot"
+                                style={{ background: 'linear-gradient(135deg,rgba(20,184,166,0.12) 0%,rgba(6,182,212,0.06) 100%)' }}
+                                onClick={() => { setShowProgressModal(false); setSelectedGame(spotlight.game as any); fetchLauncherGameDetails(spotlight.game.id); }}>
+                                {(spotlight.heroBannerUrl || spotlight.game.artwork) && (
+                                  <div className="relative h-36 overflow-hidden">
+                                    <img src={spotlight.heroBannerUrl || spotlight.game.artwork} alt=""
+                                      className="w-full h-full object-cover opacity-40 group-hover/spot:opacity-55 transition-opacity scale-105"
+                                      onError={(e) => { const t = e.target as HTMLImageElement; if (t.src !== spotlight.game.artwork) t.src = spotlight.game.artwork; }}/>
+                                    <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-[#1a1a1a]"/>
+                                    <div className="absolute inset-0 bg-gradient-to-r from-teal-500/10 to-transparent pointer-events-none"/>
+                                    <div className="absolute top-3 right-4">
+                                      <div className="w-14 h-14 rounded-full border-4 flex items-center justify-center text-sm font-black"
+                                        style={{ borderColor: `hsl(${140 * spotlight.pct},70%,50%)`, color: `hsl(${140 * spotlight.pct},70%,65%)`, boxShadow: `0 0 20px hsla(${140 * spotlight.pct},70%,50%,0.45)` }}>
+                                        {Math.round(spotlight.pct * 100)}%
+                                      </div>
+                                    </div>
+                                  </div>
+                                )}
+                                <div className="px-6 pb-5 pt-3">
+                                  <p className="text-[10px] font-bold uppercase tracking-widest text-teal-400/60 mb-1">Next Finish Line</p>
+                                  <p className="text-xl font-black text-white mb-3">{spotlight.game.title}</p>
+                                  {renderBar(spotlight, 0, 'h-2.5')}
+                                  <p className="text-[10px] text-white/35 italic mt-2">{spotlight.pct > 0.8 ? 'Almost there — push through!' : spotlight.pct > 0.5 ? 'Over halfway — keep the momentum!' : 'Getting started — good luck!'}</p>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Hero stats — 2 col */}
+                            <div className="grid grid-cols-2 gap-4">
+                              <div className="bg-teal-500/10 border border-teal-500/20 rounded-2xl p-5">
+                                <p className="text-[10px] font-mono uppercase tracking-widest text-teal-400/60 mb-1">In Progress</p>
+                                <p className="text-4xl font-black text-teal-400">{gamePcts.length}</p>
+                                <p className="text-[10px] text-teal-400/40 mt-1">active games</p>
+                              </div>
+                              <div className="rounded-2xl p-5 border" style={{ background: `hsla(${avgPct * 1.4},60%,50%,0.1)`, borderColor: `hsla(${avgPct * 1.4},60%,50%,0.25)` }}>
+                                <p className="text-[10px] font-mono uppercase tracking-widest mb-1" style={{ color: `hsla(${avgPct * 1.4},60%,65%,0.7)` }}>Avg Complete</p>
+                                <p className="text-4xl font-black" style={{ color: `hsl(${avgPct * 1.4},60%,65%)` }}>{avgPct}<span className="text-xl opacity-50">%</span></p>
+                                <p className="text-[10px] mt-1" style={{ color: `hsla(${avgPct * 1.4},60%,65%,0.4)` }}>across all games</p>
+                              </div>
+                            </div>
+
+                            {/* Tracking Methods */}
+                            {gamePcts.length > 0 && (
+                              <div>
+                                <h3 className="text-xs font-bold uppercase tracking-widest text-white/30 mb-4">Tracking Methods</h3>
+                                <div className="flex gap-3">
+                                  {achCount > 0 && (
+                                    <div className="flex-1 rounded-2xl p-4 border border-emerald-500/20" style={{ background: 'rgba(16,185,129,0.08)' }}>
+                                      <p className="text-2xl font-black text-emerald-400">{achCount}</p>
+                                      <p className="text-[10px] font-bold text-emerald-400/50 uppercase tracking-wider mt-0.5">Achievements</p>
+                                      <div className="mt-2 h-1 bg-emerald-500/15 rounded-full overflow-hidden">
+                                        <motion.div initial={{ width: 0 }} animate={{ width: `${(achCount / gamePcts.length) * 100}%` }} transition={{ duration: 0.5 }} className="h-full bg-emerald-400 rounded-full"/>
+                                      </div>
+                                    </div>
+                                  )}
+                                  {hltbCount > 0 && (
+                                    <div className="flex-1 rounded-2xl p-4 border border-indigo-500/20" style={{ background: 'rgba(99,102,241,0.08)' }}>
+                                      <p className="text-2xl font-black text-indigo-400">{hltbCount}</p>
+                                      <p className="text-[10px] font-bold text-indigo-400/50 uppercase tracking-wider mt-0.5">HowLongToBeat</p>
+                                      <div className="mt-2 h-1 bg-indigo-500/15 rounded-full overflow-hidden">
+                                        <motion.div initial={{ width: 0 }} animate={{ width: `${(hltbCount / gamePcts.length) * 100}%` }} transition={{ duration: 0.5, delay: 0.1 }} className="h-full bg-indigo-400 rounded-full"/>
+                                      </div>
+                                    </div>
+                                  )}
+                                  {comboCount > 0 && (
+                                    <div className="flex-1 rounded-2xl p-4 border border-purple-500/20" style={{ background: 'rgba(168,85,247,0.08)' }}>
+                                      <p className="text-2xl font-black text-purple-400">{comboCount}</p>
+                                      <p className="text-[10px] font-bold text-purple-400/50 uppercase tracking-wider mt-0.5">Ach + HLTB</p>
+                                      <div className="mt-2 h-1 bg-purple-500/15 rounded-full overflow-hidden">
+                                        <motion.div initial={{ width: 0 }} animate={{ width: `${(comboCount / gamePcts.length) * 100}%` }} transition={{ duration: 0.5, delay: 0.15 }} className="h-full bg-purple-400 rounded-full"/>
+                                      </div>
+                                    </div>
+                                  )}
+                                  {timeCount > 0 && (
+                                    <div className="flex-1 rounded-2xl p-4 border border-amber-500/20" style={{ background: 'rgba(245,158,11,0.08)' }}>
+                                      <p className="text-2xl font-black text-amber-400">{timeCount}</p>
+                                      <p className="text-[10px] font-bold text-amber-400/50 uppercase tracking-wider mt-0.5">Playtime</p>
+                                      <div className="mt-2 h-1 bg-amber-500/15 rounded-full overflow-hidden">
+                                        <motion.div initial={{ width: 0 }} animate={{ width: `${(timeCount / gamePcts.length) * 100}%` }} transition={{ duration: 0.5, delay: 0.2 }} className="h-full bg-amber-400 rounded-full"/>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Progress Ladder */}
+                            {gamePcts.length > 0 && (
+                              <div>
+                                <h3 className="text-xs font-bold uppercase tracking-widest text-white/30 mb-4">Progress Ladder</h3>
+                                <div className="space-y-2">
+                                  {gamePcts.map((g, idx) => {
+                                    const { game, pct, barType, ach, hpct, hasCombo, hasHltbCombo } = g;
+                                    const pctColor = hasCombo ? '#c084fc' : barType === 'time' ? '#f59e0b' : barType === 'hltb' ? '#818cf8' : `hsl(${140 * pct},80%,60%)`;
+                                    const hrs = Math.round((game.playtime ?? 0) / 60 * 10) / 10;
+                                    const detail = hasHltbCombo && ach && game.hltb_main
+                                      ? `${ach.unlocked}/${ach.total} achievements · ${hrs}h / ~${game.hltb_main}h (HowLongToBeat)`
+                                      : hasCombo && ach
+                                      ? `${ach.unlocked}/${ach.total} achievements · ${hrs}h playtime`
+                                      : barType === 'ach' && ach ? `${ach.unlocked}/${ach.total} achievements`
+                                      : barType === 'hltb' && game.hltb_main ? `${hrs}h played · ~${game.hltb_main}h main story (HowLongToBeat)`
+                                      : `${hrs}h played`;
+                                    return (
+                                      <motion.div key={game.id} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: idx * 0.05 }}
+                                        className="flex items-center gap-3 p-3 rounded-2xl cursor-pointer hover:bg-white/5 transition-all border border-transparent hover:border-white/8"
+                                        onClick={() => { setShowProgressModal(false); setSelectedGame(game as any); fetchLauncherGameDetails(game.id); }}>
+                                        <span className="w-6 text-center shrink-0 text-base">{idx < 3 ? medals[idx] : <span className="text-xs font-black text-white/20">{idx + 1}</span>}</span>
+                                        <SuggestionThumb steamAppID={g.steamId || undefined} title={game.title} fallbackThumb={game.artwork} size="w-10 h-10 rounded-xl"/>
+                                        <div className="flex-1 min-w-0 space-y-1">
+                                          <p className="text-sm font-bold truncate">{game.title}</p>
+                                          {renderBar(g, 0.1 + idx * 0.05)}
+                                          <p className="text-[10px] text-white/30">{detail}</p>
+                                        </div>
+                                        {!hasCombo && <span className="text-lg font-black shrink-0 tabular-nums" style={{ color: pctColor }}>{Math.round(pct * 100)}%</span>}
+                                      </motion.div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Friends Race */}
+                            {appFriends.length > 0 && (
+                              <div>
+                                <h3 className="text-xs font-bold uppercase tracking-widest text-white/30 mb-4">Friends' Race</h3>
+                                <div className="space-y-2">
+                                  <div className="flex items-center gap-3 p-4 rounded-2xl border border-teal-500/20" style={{ background: 'rgba(20,184,166,0.08)' }}>
+                                    {user?.avatar
+                                      ? <img src={user.avatar} className="w-9 h-9 rounded-full object-cover shrink-0" alt=""/>
+                                      : <div className="w-9 h-9 rounded-full bg-teal-500/30 flex items-center justify-center text-xs font-black text-teal-300 shrink-0">{user?.username?.[0]?.toUpperCase()}</div>
+                                    }
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-sm font-bold text-teal-300">You</p>
+                                      <p className="text-[10px] text-white/30">{gamePcts.length} in progress</p>
+                                    </div>
+                                    <div className="flex items-center gap-2.5 shrink-0">
+                                      <div className="w-24 h-1.5 rounded-full overflow-hidden" style={{ background: 'rgba(20,184,166,0.15)' }}>
+                                        <motion.div initial={{ width: 0 }} animate={{ width: `${avgPct}%` }} transition={{ duration: 0.5 }} className="h-full bg-teal-400 rounded-full"/>
+                                      </div>
+                                      <span className="text-sm font-black text-teal-400 w-12 text-right tabular-nums">{avgPct}%</span>
+                                    </div>
+                                  </div>
+                                  {appFriends.map((friend, idx) => {
+                                    const fGames = companionProgress[friend.id];
+                                    const fPcts = fGames ? fGames.map((g: any) => {
+                                      const fa = (() => { try { const a = JSON.parse(g.achievements || '[]') as {unlocked:boolean}[]; return a.length > 0 ? {unlocked: a.filter((x:any)=>x.unlocked).length, total: a.length} : null; } catch { return null; } })();
+                                      const fachPct = fa ? fa.unlocked / fa.total : null;
+                                      const fhpct = (g.hltb_main && g.hltb_main > 0) ? Math.min(1, g.playtime / (g.hltb_main * 60)) : null;
+                                      return fachPct ?? fhpct ?? Math.min(1, g.playtime / 3000);
+                                    }) : null;
+                                    const fAvg = fPcts && fPcts.length ? Math.round(fPcts.reduce((s: number, p: number) => s + p, 0) / fPcts.length * 100) : null;
+                                    const isAhead = fAvg !== null && fAvg > avgPct;
+                                    return (
+                                      <motion.div key={friend.id} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: idx * 0.05 }}
+                                        className="flex items-center gap-3 p-4 bg-white/5 border border-white/5 rounded-2xl cursor-pointer hover:bg-white/8 hover:border-white/10 transition-all">
+                                        {friend.avatar
+                                          ? <img src={friend.avatar} className="w-9 h-9 rounded-full object-cover shrink-0" alt="" referrerPolicy="no-referrer"/>
+                                          : <div className="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center text-xs font-black shrink-0">{friend.username[0]?.toUpperCase()}</div>
+                                        }
+                                        <div className="flex-1 min-w-0">
+                                          <div className="flex items-center gap-2 flex-wrap">
+                                            <p className="text-sm font-bold truncate">{friend.username}</p>
+                                            {isAhead && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-rose-500/15 text-rose-400 border border-rose-500/20 shrink-0">Ahead of you!</span>}
+                                            {fAvg !== null && !isAhead && fAvg < avgPct && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/20 shrink-0">You're winning</span>}
+                                          </div>
+                                          <p className="text-[10px] text-white/30">{fGames ? `${fGames.length} in progress` : 'Loading...'}</p>
+                                        </div>
+                                        {fAvg !== null ? (
+                                          <div className="flex items-center gap-2.5 shrink-0">
+                                            <div className="w-24 h-1.5 bg-white/10 rounded-full overflow-hidden">
+                                              <motion.div initial={{ width: 0 }} animate={{ width: `${fAvg}%` }} transition={{ duration: 0.5, delay: 0.1 + idx * 0.05 }}
+                                                className="h-full rounded-full" style={{ background: isAhead ? 'linear-gradient(90deg,#f43f5e,#fb7185)' : 'rgba(255,255,255,0.3)' }}/>
+                                            </div>
+                                            <span className="text-sm font-black w-12 text-right tabular-nums" style={{ color: isAhead ? '#fb7185' : 'rgba(255,255,255,0.4)' }}>{fAvg}%</span>
+                                          </div>
+                                        ) : !fGames ? (
+                                          <div className="w-24 h-1.5 bg-white/10 rounded-full animate-pulse shrink-0"/>
+                                        ) : null}
+                                      </motion.div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Completed Games */}
+                            {completedList.length > 0 && (
+                              <div>
+                                <div className="flex items-center gap-3 mb-4">
+                                  <h3 className="text-xs font-bold uppercase tracking-widest text-white/30">Completed</h3>
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">{completedList.length} game{completedList.length !== 1 ? 's' : ''}</span>
+                                </div>
+                                <div className="space-y-2">
+                                  {completedList.map((g, idx) => {
+                                    const { game, completedByAch, completedByHltb, ach } = g;
+                                    const howLabel = completedByAch && completedByHltb ? 'Achievements + HowLongToBeat'
+                                      : completedByAch ? (ach ? `${ach.total}/${ach.total} achievements` : 'All achievements')
+                                      : `~${game.hltb_main}h via HowLongToBeat`;
+                                    return (
+                                      <motion.div key={game.id} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: idx * 0.04 }}
+                                        className="flex items-center gap-3 p-3 rounded-2xl cursor-pointer hover:bg-white/5 transition-all border border-emerald-500/10 hover:border-emerald-500/20"
+                                        style={{ background: 'rgba(16,185,129,0.04)' }}
+                                        onClick={() => { setShowProgressModal(false); setSelectedGame(game as any); fetchLauncherGameDetails(game.id); }}>
+                                        <div className="w-10 h-10 rounded-xl overflow-hidden shrink-0 bg-black/40 relative">
+                                          <SuggestionThumb steamAppID={g.steamId || undefined} title={game.title} fallbackThumb={game.artwork} size="w-10 h-10 rounded-xl opacity-60"/>
+                                          <div className="absolute inset-0 flex items-center justify-center">
+                                            <span className="text-base">✅</span>
+                                          </div>
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                          <p className="text-sm font-bold truncate text-white/70">{game.title}</p>
+                                          <p className="text-[10px] text-emerald-400/60">{howLabel}</p>
+                                        </div>
+                                        <span className="text-xs font-black text-emerald-400/60 shrink-0">Done</span>
+                                      </motion.div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
 
             <AnimatePresence>
               {showStatsDetail && (
@@ -5874,7 +6555,7 @@ export default function App() {
 
       <footer className="max-w-7xl mx-auto px-6 py-8 border-t border-white/10 flex justify-between items-center opacity-30 text-[10px] font-mono uppercase tracking-widest">
         <p>© {new Date().getFullYear()} QuestLog</p>
-        <p>v1.2.0 • Powered by Gemini</p>
+        <p>v1.2.0</p>
       </footer>
 
       <AnimatePresence>
@@ -6222,34 +6903,66 @@ export default function App() {
                             <span className="text-sm text-white/80">{shareCopied ? '✓ Copied!' : 'Copy IGDB link'}</span>
                           </button>
                         ) : null}
-                        {/* Send to friend */}
-                        <div className="p-4">
-                          <p className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-3">Send to a Friend</p>
-                          {appFriends.length === 0 ? (
-                            <p className="text-xs text-white/30 italic">No friends yet</p>
-                          ) : shareTargetFriend === null ? (
-                            <div className="flex flex-wrap gap-2">
-                              {appFriends.map(f => (
-                                <button key={f.id} onClick={() => setShareTargetFriend(f.id)}
-                                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition-colors cursor-pointer text-xs"
-                                >
-                                  <img src={f.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${f.username}`} className="w-5 h-5 rounded-full object-cover"/>
-                                  <span className="text-white/80">{f.username}</span>
-                                </button>
-                              ))}
-                            </div>
-                          ) : (
-                            <div>
+                        {/* Send to friend or group — composer when a target is selected */}
+                        {(shareTargetFriend !== null || shareTargetGroup !== null) ? (
+                          <div className="p-4">
+                            {shareTargetFriend !== null ? (
                               <p className="text-xs text-white/50 mb-2.5">To: <span className="text-white font-bold">{appFriends.find(f => f.id === shareTargetFriend)?.username}</span></p>
-                              <textarea value={shareMessageText} onChange={e => setShareMessageText(e.target.value)} placeholder="Add a message (optional)..."
-                                className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm resize-none focus:outline-none focus:border-white/30 transition-colors mb-2.5" rows={2}/>
-                              <div className="flex gap-2">
-                                <button onClick={() => setShareTargetFriend(null)} className="flex-1 py-2 rounded-full bg-white/5 text-[10px] font-bold uppercase tracking-widest text-white/50 hover:bg-white/10 transition-colors cursor-pointer">Back</button>
-                                <button onClick={() => sendGameToFriend(shareTargetFriend!, shareGameData!, shareMessageText || undefined)} className="flex-1 py-2 rounded-full bg-emerald-600 text-white text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-500 transition-colors cursor-pointer">Send</button>
-                              </div>
+                            ) : (
+                              <p className="text-xs text-white/50 mb-2.5">To: <span className="text-white font-bold">{groups.find(g => g.id === shareTargetGroup)?.name}</span> <span className="text-white/30">(group)</span></p>
+                            )}
+                            <textarea value={shareMessageText} onChange={e => setShareMessageText(e.target.value)} placeholder="Add a message (optional)..."
+                              className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm resize-none focus:outline-none focus:border-white/30 transition-colors mb-2.5" rows={2}/>
+                            <div className="flex gap-2">
+                              <button onClick={() => { setShareTargetFriend(null); setShareTargetGroup(null); setShareMessageText(''); }}
+                                className="flex-1 py-2 rounded-full bg-white/5 text-[10px] font-bold uppercase tracking-widest text-white/50 hover:bg-white/10 transition-colors cursor-pointer">Back</button>
+                              <button onClick={() => shareTargetFriend !== null
+                                  ? sendGameToFriend(shareTargetFriend, shareGameData!, shareMessageText || undefined)
+                                  : sendGameToGroup(shareTargetGroup!, shareGameData!, shareMessageText || undefined)}
+                                className="flex-1 py-2 rounded-full bg-emerald-600 text-white text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-500 transition-colors cursor-pointer">Send</button>
                             </div>
-                          )}
-                        </div>
+                          </div>
+                        ) : (
+                          <div className="p-4 space-y-4 max-h-64 overflow-y-auto">
+                            {/* Friends */}
+                            {appFriends.length > 0 && (
+                              <div>
+                                <p className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-2">Friends</p>
+                                <div className="flex flex-wrap gap-2">
+                                  {appFriends.map(f => (
+                                    <button key={f.id} onClick={() => setShareTargetFriend(f.id)}
+                                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition-colors cursor-pointer text-xs"
+                                    >
+                                      <img src={f.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${f.username}`} className="w-5 h-5 rounded-full object-cover"/>
+                                      <span className="text-white/80">{f.username}</span>
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            {/* Group chats */}
+                            {groups.length > 0 && (
+                              <div>
+                                <p className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-2">Group Chats</p>
+                                <div className="flex flex-wrap gap-2">
+                                  {groups.map(g => (
+                                    <button key={g.id} onClick={() => setShareTargetGroup(g.id)}
+                                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition-colors cursor-pointer text-xs"
+                                    >
+                                      <div className="w-5 h-5 rounded-full bg-purple-500/30 flex items-center justify-center shrink-0">
+                                        <Users size={10} className="text-purple-300"/>
+                                      </div>
+                                      <span className="text-white/80">{g.name}</span>
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            {appFriends.length === 0 && groups.length === 0 && (
+                              <p className="text-xs text-white/30 italic">No friends or groups yet</p>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -7112,48 +7825,78 @@ export default function App() {
               className="relative z-10 w-full max-w-md bg-[#1a1a1a] rounded-3xl p-8 shadow-2xl border border-white/10"
 >
               <div className="absolute inset-0 pointer-events-none z-10" style={{ boxShadow: 'inset 0 0 50px rgba(0,0,0,0.5)', borderRadius: 'inherit' }}/>
-              <div className="flex justify-between items-center mb-6">
-                <h2 className="text-2xl font-bold tracking-tighter uppercase italic font-serif">Pick a Server</h2>
+              <div className="flex justify-between items-center mb-2">
+                <h2 className="text-2xl font-bold tracking-tighter uppercase italic font-serif">Link a Server</h2>
                 <button onClick={() => setShowDiscordGuildPicker(false)} className="p-2 hover:bg-white/5 rounded-full transition-colors cursor-pointer">
                   <X size={24}/>
                 </button>
               </div>
 
-              <p className="text-xs text-white/30 mb-6 -mt-2">
-                Members of this server will appear in Friends Online. Add <code className="bg-white/5 px-1.5 py-0.5 rounded font-mono">DISCORD_BOT_TOKEN</code> to your <code className="bg-white/5 px-1.5 py-0.5 rounded font-mono">.env</code> for live presence data.
+              <p className="text-xs text-white/30 mb-4">
+                Paste a Discord invite link to link your server. Then invite the bot so it can show member presence.
               </p>
 
-              {discordGuildsLoading ? (
-                <div className="flex items-center justify-center py-12">
-                  <Loader2 className="animate-spin opacity-40" size={28}/>
-                </div>
-              ) : discordGuilds.length === 0 ? (
-                <p className="text-xs text-white/30 italic text-center py-8">No servers found. Re-link Discord to grant the guilds permission.</p>
-              ) : (
-                <div className="space-y-2 max-h-72 overflow-y-auto -mx-2 px-2">
-                  {discordGuilds.map(guild => (
-                    <button key={guild.id} onClick={() => handleSelectDiscordGuild(guild.id)}
-                      className={cn(
-"w-full flex items-center gap-3 p-4 rounded-2xl border transition-all text-left cursor-pointer",
-                        homeData?.discordGuildId === guild.id
-                          ?"bg-white/5 border-white/20"
-                          :"bg-black/20 border-white/5 hover:bg-white/5"
+              {homeData?.discordClientId && (
+                <button
+                  onClick={() => {
+                    const url = `https://discord.com/api/oauth2/authorize?client_id=${homeData.discordClientId}&permissions=8&scope=bot`;
+                    try { (window as any).require('electron').ipcRenderer.invoke('open-external', url); } catch { window.open(url, '_blank'); }
+                  }}
+                  className="flex items-center gap-2 w-full mb-6 px-4 py-3 rounded-2xl bg-[#5865F2]/10 border border-[#5865F2]/20 hover:bg-[#5865F2]/20 transition-colors text-xs font-bold text-[#5865F2] cursor-pointer"
+                >
+                  <DiscordIcon className="w-4 h-4"/>
+                  Invite Bot to Your Server
+                  {homeData.discordGuildCached && <span className="ml-auto text-emerald-400 flex items-center gap-1"><CheckCircle2 size={12}/> Connected</span>}
+                </button>
+              )}
+
+              <div className="flex gap-2 mb-4">
+                <input
+                  type="text"
+                  value={discordGuildInput}
+                  onChange={e => { setDiscordGuildInput(e.target.value); setDiscordGuildPreview(null); setDiscordGuildError(null); }}
+                  onKeyDown={e => e.key === 'Enter' && handleResolveDiscordInvite()}
+                  placeholder="discord.gg/yourserver"
+                  className="flex-1 bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-sm text-white placeholder:text-white/20 outline-none focus:border-white/30 transition-colors"
+                />
+                <button
+                  onClick={handleResolveDiscordInvite}
+                  disabled={discordGuildResolving || !discordGuildInput.trim()}
+                  className="px-4 py-3 bg-[#5865F2] text-white rounded-2xl font-bold text-sm disabled:opacity-40 hover:bg-[#4752c4] transition-colors cursor-pointer disabled:cursor-default"
+                >
+                  {discordGuildResolving ? <Loader2 size={16} className="animate-spin"/> : 'Find'}
+                </button>
+              </div>
+
+              {discordGuildError && (
+                <p className="text-xs text-red-400 mb-4">{discordGuildError}</p>
+              )}
+
+              {discordGuildPreview && (
+                <div className="mb-6">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-white/30 mb-3">Server found</p>
+                  <button
+                    onClick={() => handleSelectDiscordGuild(discordGuildPreview.id, discordGuildPreview.name, discordGuildPreview.icon_url || undefined)}
+                    className="w-full flex items-center gap-3 p-4 rounded-2xl bg-white/5 border border-[#5865F2]/40 hover:border-[#5865F2]/80 transition-all text-left cursor-pointer"
+                  >
+                    {discordGuildPreview.icon_url
+                      ? <img src={discordGuildPreview.icon_url} className="w-10 h-10 rounded-xl shrink-0" alt={discordGuildPreview.name}/>
+                      : <div className="w-10 h-10 rounded-xl bg-[#5865F2]/20 flex items-center justify-center text-xs font-bold shrink-0">{discordGuildPreview.name.slice(0, 2).toUpperCase()}</div>
+                    }
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-bold truncate">{discordGuildPreview.name}</p>
+                      {discordGuildPreview.approximate_member_count != null && (
+                        <p className="text-[10px] text-white/30">{discordGuildPreview.approximate_member_count.toLocaleString()} members</p>
                       )}
->
-                      {guild.icon
-                        ? <img src={guild.icon} className="w-8 h-8 rounded-lg" alt={guild.name}/>
-                        : <div className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center text-[10px] font-bold">{guild.name.slice(0, 2).toUpperCase()}</div>
-                      }
-                      <span className="text-xs font-bold flex-1">{guild.name}</span>
-                      {homeData?.discordGuildId === guild.id && <CheckCircle2 size={16} className="text-emerald-500"/>}
-                    </button>
-                  ))}
+                    </div>
+                    <div className="text-xs font-bold text-[#5865F2]">Link</div>
+                  </button>
                 </div>
               )}
 
               {homeData?.discordGuildId && (
-                <button onClick={() => handleSelectDiscordGuild('')} className="mt-6 w-full text-xs font-bold uppercase tracking-widest text-white/20 hover:text-red-500 transition-colors cursor-pointer">
-                  Remove server
+                <button onClick={() => handleSelectDiscordGuild('')} className="w-full text-xs font-bold uppercase tracking-widest text-white/20 hover:text-red-500 transition-colors cursor-pointer">
+                  Remove linked server
                 </button>
               )}
             </motion.div>
@@ -7286,6 +8029,10 @@ export default function App() {
         setSessionMessage={setSessionMessage}
         setExpandedFriend={setExpandedFriend}
         markMessagesRead={remoteMarkMessagesRead}
+        handleLinkProfile={handleLinkProfile}
+        handleSyncXbox={handleSyncXbox}
+        handleSyncEpic={handleSyncEpic}
+        setShowSteamLinkModal={setShowSteamLinkModal}
       />
 
       {/* ── AVATAR EDIT MODAL ── */}
@@ -7326,6 +8073,15 @@ export default function App() {
         setSessionMessage={setSessionMessage}
         handleSendSessionInvite={handleSendSessionInvite}
       />
+
+      {/* ── CARD TOOLTIP ── */}
+      {cardTooltip && (
+        <div className="fixed z-[9999] pointer-events-none" style={{ left: cardTooltip.x + 12, top: cardTooltip.y - 28 }}>
+          <div className="bg-black/80 backdrop-blur-sm text-white text-[9px] font-medium px-2 py-0.5 rounded-full whitespace-nowrap">
+            {cardTooltip.title}
+          </div>
+        </div>
+      )}
 
       {/* ── DAILY DIGEST MODAL ── */}
       <DailyDigestModal

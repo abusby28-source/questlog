@@ -8,9 +8,170 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { readdirSync, statSync } from "fs";
 import { GoogleGenAI } from "@google/genai";
+import WebSocket from "ws";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// ─── Discord Gateway Client ───────────────────────────────────────────────────
+// Connects to the Discord Gateway with GUILDS | GUILD_MEMBERS | GUILD_PRESENCES
+// intents and caches per-guild member presence in memory.
+// Requires "Presence Intent" and "Server Members Intent" enabled in the Discord
+// Developer Portal (Bot → Privileged Gateway Intents).
+
+type DiscordPresenceEntry = {
+  userId: string;
+  username: string;
+  displayName: string;
+  avatar: string;
+  status: 'online' | 'idle' | 'dnd' | 'offline';
+  currentGame: string | null;
+};
+
+// guildId → userId → presence
+const discordPresenceCache = new Map<string, Map<string, DiscordPresenceEntry>>();
+const DISCORD_INTENTS = (1 << 0) | (1 << 1) | (1 << 8); // GUILDS | GUILD_MEMBERS | GUILD_PRESENCES
+
+let _gatewayWs: WebSocket | null = null;
+let _heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let _gatewaySeq: number | null = null;
+let _gatewaySession: string | null = null;
+let _gatewayResumeUrl: string | null = null;
+
+function discordAvatarUrl(userId: string, hash: string | null | undefined): string {
+  if (hash) return `https://cdn.discordapp.com/avatars/${userId}/${hash}.png?size=64`;
+  return `https://cdn.discordapp.com/embed/avatars/${(parseInt(userId.slice(-4), 16) || 0) % 6}.png`;
+}
+
+function discordCurrentGame(activities: any[]): string | null {
+  const playing = activities?.find((a: any) => a.type === 0); // type 0 = Playing
+  return playing?.name || null;
+}
+
+function handleGatewayDispatch(type: string, data: any) {
+  switch (type) {
+    case 'READY':
+      _gatewaySession = data.session_id;
+      _gatewayResumeUrl = data.resume_gateway_url;
+      console.log('[Discord Gateway] Ready');
+      break;
+
+    case 'GUILD_CREATE': {
+      if (!discordPresenceCache.has(data.id)) discordPresenceCache.set(data.id, new Map());
+      const cache = discordPresenceCache.get(data.id)!;
+      const presenceMap = new Map<string, any>((data.presences || []).map((p: any) => [p.user.id, p]));
+      for (const member of (data.members || [])) {
+        const uid = member.user.id;
+        const presence = presenceMap.get(uid);
+        cache.set(uid, {
+          userId: uid,
+          username: member.user.username,
+          displayName: member.nick || member.user.global_name || member.user.username,
+          avatar: discordAvatarUrl(uid, member.user.avatar),
+          status: presence?.status || 'offline',
+          currentGame: discordCurrentGame(presence?.activities || []),
+        });
+      }
+      console.log(`[Discord Gateway] Cached ${cache.size} members for guild ${data.id}`);
+      break;
+    }
+
+    case 'PRESENCE_UPDATE': {
+      const { guild_id, user, status, activities } = data;
+      if (!guild_id) break;
+      if (!discordPresenceCache.has(guild_id)) discordPresenceCache.set(guild_id, new Map());
+      const cache = discordPresenceCache.get(guild_id)!;
+      const existing = cache.get(user.id);
+      if (existing) {
+        existing.status = status;
+        existing.currentGame = discordCurrentGame(activities || []);
+        if (user.avatar) existing.avatar = discordAvatarUrl(user.id, user.avatar);
+        if (user.global_name || user.username) existing.displayName = user.global_name || user.username;
+      } else {
+        cache.set(user.id, {
+          userId: user.id,
+          username: user.username || 'Unknown',
+          displayName: user.global_name || user.username || 'Unknown',
+          avatar: discordAvatarUrl(user.id, user.avatar),
+          status: status || 'offline',
+          currentGame: discordCurrentGame(activities || []),
+        });
+      }
+      break;
+    }
+
+    case 'GUILD_MEMBER_UPDATE': {
+      const cache = discordPresenceCache.get(data.guild_id);
+      if (!cache) break;
+      const entry = cache.get(data.user.id);
+      if (entry) {
+        entry.displayName = data.nick || data.user.global_name || data.user.username || entry.displayName;
+        if (data.user.avatar) entry.avatar = discordAvatarUrl(data.user.id, data.user.avatar);
+      }
+      break;
+    }
+  }
+}
+
+function startDiscordGateway(botToken: string, url = 'wss://gateway.discord.gg/?v=10&encoding=json') {
+  if (_heartbeatTimer) { clearInterval(_heartbeatTimer); _heartbeatTimer = null; }
+  if (_gatewayWs) { try { _gatewayWs.terminate(); } catch {} }
+
+  const ws = new WebSocket(url);
+  _gatewayWs = ws;
+
+  ws.on('message', (raw: WebSocket.RawData) => {
+    let payload: any;
+    try { payload = JSON.parse(raw.toString()); } catch { return; }
+    const { op, d, t, s } = payload;
+    if (s != null) _gatewaySeq = s;
+
+    switch (op) {
+      case 10: { // HELLO
+        const interval = d.heartbeat_interval;
+        // Send first heartbeat after a random jitter
+        setTimeout(() => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ op: 1, d: _gatewaySeq })), Math.random() * interval);
+        _heartbeatTimer = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ op: 1, d: _gatewaySeq }));
+        }, interval);
+
+        if (_gatewaySession && _gatewayResumeUrl) {
+          ws.send(JSON.stringify({ op: 6, d: { token: botToken, session_id: _gatewaySession, seq: _gatewaySeq } }));
+        } else {
+          ws.send(JSON.stringify({
+            op: 2,
+            d: { token: botToken, intents: DISCORD_INTENTS, properties: { os: 'linux', browser: 'questlog', device: 'questlog' } }
+          }));
+        }
+        break;
+      }
+      case 0:  handleGatewayDispatch(t, d); break;
+      case 7:  scheduleReconnect(botToken, _gatewayResumeUrl || undefined); break; // RECONNECT
+      case 9:  // INVALID_SESSION
+        if (!d) { _gatewaySession = null; _gatewayResumeUrl = null; }
+        scheduleReconnect(botToken, undefined, 2000);
+        break;
+    }
+  });
+
+  ws.on('close', (code) => {
+    if (_heartbeatTimer) { clearInterval(_heartbeatTimer); _heartbeatTimer = null; }
+    console.log(`[Discord Gateway] Closed (${code})`);
+    const noRetry = [4004, 4010, 4011, 4012, 4013, 4014];
+    if (!noRetry.includes(code)) scheduleReconnect(botToken);
+  });
+
+  ws.on('error', (err) => console.error('[Discord Gateway] Error:', err.message));
+}
+
+function scheduleReconnect(botToken: string, resumeUrl?: string, delayMs = 5000) {
+  setTimeout(() => startDiscordGateway(botToken, resumeUrl || 'wss://gateway.discord.gg/?v=10&encoding=json'), delayMs);
+}
+
+if (process.env.DISCORD_BOT_TOKEN) {
+  startDiscordGateway(process.env.DISCORD_BOT_TOKEN);
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 const dbPath = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, "games.db") : "games.db";
 const db = new Database(dbPath);
@@ -130,6 +291,15 @@ db.exec(`
   );
 
   CREATE UNIQUE INDEX IF NOT EXISTS idx_launcher_unique ON launcher_games(platform, external_id, user_id);
+  CREATE INDEX IF NOT EXISTS idx_launcher_games_user_id ON launcher_games(user_id);
+  CREATE INDEX IF NOT EXISTS idx_games_user_id ON games(user_id);
+  CREATE INDEX IF NOT EXISTS idx_messages_receiver_id ON messages(receiver_id);
+  CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages(sender_id);
+  CREATE INDEX IF NOT EXISTS idx_friendships_requester ON friendships(requester_id);
+  CREATE INDEX IF NOT EXISTS idx_friendships_addressee ON friendships(addressee_id);
+  CREATE INDEX IF NOT EXISTS idx_group_members_user_id ON group_members(user_id);
+  CREATE INDEX IF NOT EXISTS idx_group_messages_group_id ON group_messages(group_id);
+  CREATE INDEX IF NOT EXISTS idx_playtime_logs_user_game ON playtime_logs(user_id, game_id);
 
   CREATE TABLE IF NOT EXISTS playtime_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -244,6 +414,9 @@ try {
     if (launcherSchema && !launcherSchema.sql.includes("metacritic")) {
       db.exec("ALTER TABLE launcher_games ADD COLUMN metacritic INTEGER");
     }
+    if (launcherSchema && !launcherSchema.sql.includes("hltb_main")) {
+      db.exec("ALTER TABLE launcher_games ADD COLUMN hltb_main REAL"); // main story hours from IGDB
+    }
     const gamesSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='games'").get();
     if (gamesSchema && !gamesSchema.sql.includes("horizontal_grid")) {
       db.exec("ALTER TABLE games ADD COLUMN horizontal_grid TEXT");
@@ -260,6 +433,22 @@ try {
         db.exec("UPDATE games SET horizontal_grid = NULL");
         db.exec("UPDATE launcher_games SET horizontal_grid = NULL");
         db.exec("INSERT INTO migrations (name) VALUES ('clear_horizontal_grid')");
+      }
+
+      // Reset IGDB-sourced HLTB data so it gets re-fetched from HowLongToBeat.com
+      const hasResetHltb = db.prepare("SELECT * FROM migrations WHERE name = 'reset_hltb_igdb_source'").get();
+      if (!hasResetHltb) {
+        db.exec("UPDATE launcher_games SET hltb_main = NULL");
+        db.exec("INSERT INTO migrations (name) VALUES ('reset_hltb_igdb_source')");
+        console.log("Migration: reset HLTB data (was IGDB-sourced, will re-fetch from HowLongToBeat.com)");
+      }
+
+      // Reset failed HLTB lookups (sentinel -1) caused by broken API endpoint so they get re-fetched
+      const hasResetFailedHltb = db.prepare("SELECT * FROM migrations WHERE name = 'reset_hltb_failed_sentinel'").get();
+      if (!hasResetFailedHltb) {
+        db.exec("UPDATE launcher_games SET hltb_main = NULL WHERE hltb_main = -1");
+        db.exec("INSERT INTO migrations (name) VALUES ('reset_hltb_failed_sentinel')");
+        console.log("Migration: reset failed HLTB sentinel values (will re-fetch now that API endpoint is fixed)");
       }
 
       // Fix Xbox games incorrectly inserted with hidden=1 by old sync code
@@ -379,6 +568,15 @@ try {
     if (!userColumns.includes('discord_id')) {
       console.log("Adding discord_id to users...");
       db.exec("ALTER TABLE users ADD COLUMN discord_id TEXT");
+    }
+    if (!userColumns.includes('discord_guild_id')) {
+      db.exec("ALTER TABLE users ADD COLUMN discord_guild_id TEXT");
+    }
+    if (!userColumns.includes('discord_guild_name')) {
+      db.exec("ALTER TABLE users ADD COLUMN discord_guild_name TEXT");
+    }
+    if (!userColumns.includes('discord_guild_icon')) {
+      db.exec("ALTER TABLE users ADD COLUMN discord_guild_icon TEXT");
     }
     if (!userColumns.includes('avatar')) {
       console.log("Adding avatar to users...");
@@ -1062,44 +1260,28 @@ async function fetchMetacriticUserScore(title: string): Promise<number | null> {
       },
       signal: AbortSignal.timeout(10000),
     });
-    console.log(`[Metacritic] ${title} → ${url} → HTTP ${r.status}`);
     if (!r.ok) return null;
     const html = await r.text();
 
-    // Metacritic now uses Nuxt.js with a devalue-compressed state.
-    // In that format "userScore" is the review COUNT (integer), NOT the score.
-    // The actual user score float (e.g. 8.3) appears as a bare literal immediately
-    // after a standalone {"score":<ref>} object in the Nuxt payload array.
-    // Strategy: locate the game's own slug in the HTML to anchor to the right section,
-    // then search nearby for the {"score":<ref>},<float> pattern.
-
-    // Metacritic now uses Nuxt with devalue-compressed state.
+    // Metacritic uses Nuxt with devalue-compressed state.
     // The user score float (e.g. 8.3) appears as a bare literal immediately after
     // a standalone {"score":<ref>} object in the Nuxt payload array.
     // Anchor search to the game's own slug to avoid picking up related-games scores.
     const slugLiteral = `"${slug}"`;
-    // Check every occurrence of the slug (it may appear in meta tags, breadcrumbs,
-    // and Nuxt state — we want the one adjacent to score data)
     let searchFrom = 0;
     while (true) {
       const slugIdx = html.indexOf(slugLiteral, searchFrom);
       if (slugIdx < 0) break;
-      // Devalue stores primitive values before the objects that reference them,
-      // so search both before (-3000) and after (+5000) the slug occurrence
       const chunk = html.slice(Math.max(0, slugIdx - 3000), slugIdx + 5000);
       const scoreMatch = chunk.match(/\{"score":\d+\},([\d]+\.[\d]+)/);
       if (scoreMatch) {
         const n = parseFloat(scoreMatch[1]);
-        console.log(`[Metacritic] ${title} → score near slug at ${slugIdx}: ${n}`);
         if (n >= 0.1 && n <= 10.0) return n;
       }
       searchFrom = slugIdx + slugLiteral.length;
     }
-
-    console.log(`[Metacritic] ${title} → no score found`);
     return null;
-  } catch (e) {
-    console.log(`[Metacritic] ${title} → fetch error: ${e}`);
+  } catch {
     return null;
   }
 }
@@ -1125,6 +1307,134 @@ async function getIgdbToken() {
     console.error("Failed to get IGDB token", e);
   }
   return null;
+}
+
+// ─── HowLongToBeat direct integration ────────────────────────────────────────
+// HLTB uses an obfuscated API (endpoint changes periodically):
+//   1. GET /api/bleed/init?t={ms}  → { token, hpKey, hpVal }  (cache 90s)
+//   2. POST /api/bleed  with x-auth-token / x-hp-key / x-hp-val headers
+//      and hpKey:hpVal injected as a top-level field in the JSON body
+
+const HLTB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const HLTB_BASE = 'https://howlongtobeat.com';
+
+let hltbAuth: { token: string; hpKey: string; hpVal: string; ts: number } | null = null;
+
+async function getHltbAuth(): Promise<{ token: string; hpKey: string; hpVal: string } | null> {
+  if (hltbAuth && Date.now() - hltbAuth.ts < 90_000) {
+    return hltbAuth;
+  }
+  try {
+    const res = await fetch(`${HLTB_BASE}/api/bleed/init?t=${Date.now()}`, {
+      headers: {
+        'User-Agent': HLTB_UA,
+        'Referer': HLTB_BASE,
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+      },
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as any;
+    if (!data?.token) return null;
+    hltbAuth = { token: data.token, hpKey: data.hpKey, hpVal: data.hpVal, ts: Date.now() };
+    return hltbAuth;
+  } catch (e) {
+    console.error('[HLTB] Auth init failed:', e);
+    return null;
+  }
+}
+
+function hltbLevenshtein(s: string, t: string): number {
+  const m = s.length, n = t.length;
+  const d: number[][] = Array.from({ length: m + 1 }, (_, i) =>
+    Array.from({ length: n + 1 }, (_, j) => i === 0 ? j : j === 0 ? i : 0));
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      d[i][j] = s[i-1] === t[j-1] ? d[i-1][j-1] : 1 + Math.min(d[i-1][j], d[i][j-1], d[i-1][j-1]);
+  return d[m][n];
+}
+
+async function fetchHltbHours(title: string): Promise<number | null> {
+  try {
+    const auth = await getHltbAuth();
+    if (!auth) return null;
+
+    const body: any = {
+      searchType: 'games',
+      searchTerms: title.split(' '),
+      searchPage: 1,
+      size: 20,
+      searchOptions: {
+        games: {
+          userId: 0,
+          platform: '',
+          sortCategory: 'popular',
+          rangeCategory: 'main',
+          rangeTime: { min: 0, max: 0 },
+          gameplay: { perspective: '', flow: '', genre: '', difficulty: '' },
+          rangeYear: { min: '', max: '' },
+          modifier: '',
+        },
+        users: { sortCategory: 'postcount' },
+        lists: { sortCategory: 'follows' },
+        filter: '',
+        sort: 0,
+        randomizer: 0,
+      },
+      useCache: true,
+    };
+    // Inject the dynamic hp key/value into the body (as Playnite plugin does)
+    if (auth.hpKey) body[auth.hpKey] = auth.hpVal;
+
+    const res = await fetch(`${HLTB_BASE}/api/bleed`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'User-Agent': HLTB_UA,
+        'Origin': HLTB_BASE,
+        'Referer': HLTB_BASE,
+        'x-auth-token': auth.token,
+        'x-hp-key': auth.hpKey ?? '',
+        'x-hp-val': auth.hpVal ?? '',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) hltbAuth = null; // force re-auth
+      return null;
+    }
+
+    const data = await res.json() as any;
+    const results: any[] = data?.data ?? [];
+    if (!results.length) return null;
+
+    // Pick best match by Levenshtein similarity to the searched title
+    const titleLower = title.toLowerCase().trim();
+    const scored = results
+      .filter((r: any) => r.game_type === 'game' || !r.game_type) // skip DLC entries
+      .map((r: any) => {
+        const name = (r.game_name || '').toLowerCase().trim();
+        const longer = name.length >= titleLower.length ? name : titleLower;
+        const shorter = name.length < titleLower.length ? name : titleLower;
+        const dist = hltbLevenshtein(longer, shorter);
+        return { r, similarity: (longer.length - dist) / longer.length };
+      })
+      .sort((a, b) => b.similarity - a.similarity);
+
+    if (!scored.length || scored[0].similarity < 0.4) return null;
+    const best = scored[0].r;
+
+    // comp_main / comp_plus / comp_100 are all in seconds
+    const secs = best.comp_main > 0 ? best.comp_main
+      : best.comp_plus > 0 ? best.comp_plus
+      : best.comp_100 > 0 ? best.comp_100 : 0;
+    if (!secs) return null;
+    return Math.round(secs / 3600 * 10) / 10; // seconds → hours, 1 dp
+  } catch (e) {
+    console.error('[HLTB] Search failed for', title, e);
+    return null;
+  }
 }
 
   app.get("/api/igdb/search", async (req, res) => {
@@ -1621,21 +1931,20 @@ async function getIgdbToken() {
     if (!catalog.size) return;
     const userGames = db.prepare("SELECT id, title, game_pass FROM games WHERE user_id = ?").all(userId) as any[];
     const nc = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
-    for (const game of userGames) {
-      const normalized = nc(game.title);
-      const words = normalized.split(/\s+/).filter((w: string) => w.length > 1);
-      const onPass = catalog.has(normalized) || (words.length > 0 && [...catalog.keys()].some(t => words.every((w: string) => t.includes(w))));
-      if (onPass && !game.game_pass) {
-        // Newly added to Game Pass — flag it
-        db.prepare("UPDATE games SET game_pass = 1, game_pass_new = 1, game_pass_added_at = ? WHERE id = ? AND user_id = ?").run(new Date().toISOString(), game.id, userId);
-      } else if (onPass && game.game_pass) {
-        // Already marked on Game Pass — just ensure game_pass stays 1, don't touch game_pass_new
-        db.prepare("UPDATE games SET game_pass = 1 WHERE id = ? AND user_id = ?").run(game.id, userId);
-      } else if (!onPass && game.game_pass) {
-        // Removed from Game Pass
-        db.prepare("UPDATE games SET game_pass = 0, game_pass_new = 0 WHERE id = ? AND user_id = ?").run(game.id, userId);
+    const now = new Date().toISOString();
+    const stmtNew     = db.prepare("UPDATE games SET game_pass = 1, game_pass_new = 1, game_pass_added_at = ? WHERE id = ? AND user_id = ?");
+    const stmtKeep    = db.prepare("UPDATE games SET game_pass = 1 WHERE id = ? AND user_id = ?");
+    const stmtRemoved = db.prepare("UPDATE games SET game_pass = 0, game_pass_new = 0 WHERE id = ? AND user_id = ?");
+    db.transaction(() => {
+      for (const game of userGames) {
+        const normalized = nc(game.title);
+        const words = normalized.split(/\s+/).filter((w: string) => w.length > 1);
+        const onPass = catalog.has(normalized) || (words.length > 0 && [...catalog.keys()].some(t => words.every((w: string) => t.includes(w))));
+        if (onPass && !game.game_pass)  stmtNew.run(now, game.id, userId);
+        else if (onPass && game.game_pass)  stmtKeep.run(game.id, userId);
+        else if (!onPass && game.game_pass) stmtRemoved.run(game.id, userId);
       }
-    }
+    })();
   }
 
   app.patch("/api/games/:id/dismiss-game-pass-alert", authenticateToken, (req, res) => {
@@ -1711,9 +2020,9 @@ async function getIgdbToken() {
   const suggestedCache = new Map<number, { data: any[]; timestamp: number }>();
   const SUGGESTED_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
 
-  // Per-user friends activity cache — raw items only (no artwork, no DB match IDs), refreshes once per day
+  // Per-user friends activity cache — raw items only (no artwork, no DB match IDs), refreshes every 30 minutes
   const friendsActivityCache = new Map<number, { items: any[]; timestamp: number }>();
-  const FRIENDS_ACTIVITY_TTL = 24 * 60 * 60 * 1000;
+  const FRIENDS_ACTIVITY_TTL = 30 * 60 * 1000;
 
   // Short-lived artwork cache so repeated home page loads don't hammer SGDB
   const horizontalArtworkCache = new Map<string, { url: string; timestamp: number }>();
@@ -2816,6 +3125,48 @@ async function getIgdbToken() {
         }
       </script></body></html>`);
     }
+  });
+
+  // Resolve a Discord invite link or code to guild info using the bot token
+  app.post("/api/user/discord-guild/resolve", authenticateToken, async (req, res) => {
+    const botToken = process.env.DISCORD_BOT_TOKEN;
+    if (!botToken) return res.status(500).json({ error: "DISCORD_BOT_TOKEN not configured" });
+
+    let { invite } = req.body as { invite: string };
+    if (!invite) return res.status(400).json({ error: "invite is required" });
+
+    // Extract the code from full URLs: discord.gg/xxx, discord.com/invite/xxx
+    invite = invite.trim().replace(/^https?:\/\/(www\.)?(discord\.gg|discord\.com\/invite)\//i, '').split('?')[0].split('/')[0];
+
+    try {
+      const r = await fetch(`https://discord.com/api/v10/invites/${invite}?with_counts=true`, {
+        headers: { Authorization: `Bot ${botToken}` }
+      });
+      if (!r.ok) return res.status(400).json({ error: "Invalid invite link or code" });
+      const data = await r.json() as any;
+      const guild = data.guild;
+      if (!guild) return res.status(400).json({ error: "Invite does not link to a server" });
+      const icon_url = guild.icon
+        ? `https://cdn.discordapp.com/icons/${guild.id}/${guild.icon}.png?size=64`
+        : null;
+      res.json({ id: guild.id, name: guild.name, icon_url, approximate_member_count: data.approximate_member_count });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to resolve invite" });
+    }
+  });
+
+  // Save the selected Discord guild to the user's profile
+  app.patch("/api/user/discord-guild", authenticateToken, async (req, res) => {
+    const { guild_id, guild_name, guild_icon } = req.body as { guild_id: string; guild_name?: string; guild_icon?: string };
+    if (guild_id === '') {
+      // Clear
+      db.prepare("UPDATE users SET discord_guild_id = NULL, discord_guild_name = NULL, discord_guild_icon = NULL WHERE id = ?").run(req.user.id);
+    } else {
+      if (!guild_id) return res.status(400).json({ error: "guild_id is required" });
+      db.prepare("UPDATE users SET discord_guild_id = ?, discord_guild_name = ?, discord_guild_icon = ? WHERE id = ?")
+        .run(guild_id, guild_name || null, guild_icon || null, req.user.id);
+    }
+    res.json({ ok: true });
   });
 
   app.post("/api/launcher/link-xbox", authenticateToken, async (req, res) => {
@@ -5968,11 +6319,25 @@ async function getIgdbToken() {
 
         // 1. Recently played
         const recentlyPlayed = db.prepare(`
-          SELECT * FROM launcher_games 
-          WHERE user_id = ? AND last_played IS NOT NULL 
+          SELECT * FROM launcher_games
+          WHERE user_id = ? AND last_played IS NOT NULL
           GROUP BY id
-          ORDER BY last_played DESC LIMIT 5
-        `).all(userId);
+          ORDER BY last_played DESC LIMIT 10
+        `).all(userId) as any[];
+
+        // Enrich recently played with HLTB data (fetch + cache missing entries, fire-and-forget style)
+        await Promise.all(recentlyPlayed.map(async (game: any) => {
+          if (game.hltb_main != null) return; // already cached
+          const hours = await fetchHltbHours(game.title);
+          if (hours !== null) {
+            db.prepare("UPDATE launcher_games SET hltb_main = ? WHERE id = ?").run(hours, game.id);
+            game.hltb_main = hours;
+          } else {
+            // Mark as attempted so we don't keep retrying (store -1 as sentinel)
+            db.prepare("UPDATE launcher_games SET hltb_main = -1 WHERE id = ?").run(game.id);
+            game.hltb_main = -1;
+          }
+        }));
 
         // 2. Friends' activity (latest additions to shared groups)
         const friendsActivity = db.prepare(`
@@ -6023,33 +6388,33 @@ async function getIgdbToken() {
                 // Only fetch per-friend recently-played data when cache is stale
                 if (!activityCacheFresh) {
                   const steamActivityItems = await Promise.all(
-                    steamFriends.slice(0, 5).map(async (friend: any) => {
+                    steamFriends.slice(0, 20).map(async (friend: any) => {
                       try {
                         const recentRes = await fetch(
-                          `https://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v0001/?key=${process.env.STEAM_API_KEY}&steamid=${friend.id}&count=1`
+                          `https://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v0001/?key=${process.env.STEAM_API_KEY}&steamid=${friend.id}&count=3`
                         );
-                        if (!recentRes.ok) return null;
+                        if (!recentRes.ok) return [];
                         const recentData = await recentRes.json();
-                        const recentGame = recentData.response?.games?.[0];
-                        if (!recentGame) return null;
-                        const appid = String(recentGame.appid);
-                        const sgdbArtwork = await getHorizontalArtwork(recentGame.name, appid);
-                        const artwork = sgdbArtwork || `https://shared.steamstatic.com/store_item_assets/steam/apps/${appid}/header.jpg`;
-                        return {
-                          _external: true,
-                          id: `steam-friend-${friend.id}-${appid}`,
-                          title: recentGame.name,
-                          artwork,
-                          genre: '',
-                          steamAppID: appid,
-                          platform: 'steam',
-                          friendName: friend.username,
-                          friendAvatar: friend.avatar,
-                        };
-                      } catch { return null; }
+                        const games = recentData.response?.games || [];
+                        return games.map((recentGame: any) => {
+                          const appid = String(recentGame.appid);
+                          const artwork = `https://shared.steamstatic.com/store_item_assets/steam/apps/${appid}/header.jpg`;
+                          return {
+                            _external: true,
+                            id: `steam-friend-${friend.id}-${appid}`,
+                            title: recentGame.name,
+                            artwork,
+                            genre: '',
+                            steamAppID: appid,
+                            platform: 'steam',
+                            friendName: friend.username,
+                            friendAvatar: friend.avatar,
+                          };
+                        });
+                      } catch { return []; }
                     })
                   );
-                  allFriendActivities.push(...steamActivityItems.filter(Boolean));
+                  allFriendActivities.push(...steamActivityItems.flat());
                 }
               }
             }
@@ -6188,9 +6553,89 @@ async function getIgdbToken() {
         }
       }
 
-      // Update cache with fresh raw items; otherwise use cached items
-      if (!activityCacheFresh && allFriendActivities.length > 0) {
-        friendsActivityCache.set(userId, { items: allFriendActivities, timestamp: Date.now() });
+      // Fetch Epic Games friends online
+      if ((user as any).epic_account_id && (user as any).epic_refresh_token) {
+        try {
+          const epRes = await fetch(EPIC_TOKEN_URL, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Authorization': `Basic ${Buffer.from(`${EPIC_CLIENT_ID}:${EPIC_CLIENT_SECRET}`).toString('base64')}`,
+            },
+            body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: (user as any).epic_refresh_token, token_type: 'eg1' }),
+          });
+          if (epRes.ok) {
+            const epData = await epRes.json();
+            if (epData.refresh_token) {
+              db.prepare("UPDATE users SET epic_refresh_token = ? WHERE id = ?").run(epData.refresh_token, userId);
+            }
+            const epicToken = epData.access_token;
+            const epicAccountId = (user as any).epic_account_id;
+            if (epicToken && epicAccountId) {
+              // 1. Friends list
+              const flRes = await fetch(
+                `https://friends-public-service-prod.ol.epicgames.com/friends/api/public/friends/${epicAccountId}?includePending=false`,
+                { headers: { Authorization: `Bearer ${epicToken}` } }
+              );
+              if (flRes.ok) {
+                const friendsList = (await flRes.json() as any[]);
+                const friendIds = friendsList.map((f: any) => f.accountId).slice(0, 50);
+                if (friendIds.length > 0) {
+                  // 2. Display names (batch)
+                  const qs = friendIds.map(id => `accountId=${encodeURIComponent(id)}`).join('&');
+                  const acRes = await fetch(
+                    `https://account-public-service-prod.ol.epicgames.com/account/api/public/account?${qs}`,
+                    { headers: { Authorization: `Bearer ${epicToken}` } }
+                  );
+                  const accountList = acRes.ok ? (await acRes.json() as any[]) : [];
+                  const accountMap = new Map(accountList.map((a: any) => [a.id, a]));
+
+                  // 3. Presence (best-effort)
+                  const presenceMap = new Map<string, any>();
+                  try {
+                    const prRes = await fetch(
+                      `https://presence-public-service-prod.ol.epicgames.com/presence/api/v1/_/${epicAccountId}/friends/summary`,
+                      { headers: { Authorization: `Bearer ${epicToken}` } }
+                    );
+                    if (prRes.ok) {
+                      const prData = await prRes.json() as any[];
+                      if (Array.isArray(prData)) {
+                        for (const p of prData) { if (p.accountId) presenceMap.set(p.accountId, p); }
+                      }
+                    }
+                  } catch {}
+
+                  for (const fid of friendIds) {
+                    const acct = accountMap.get(fid) as any;
+                    const pres = presenceMap.get(fid) as any;
+                    // If we got presence data, only include online friends
+                    if (presenceMap.size > 0 && (!pres || pres.status === 'offline')) continue;
+                    const displayName = acct?.displayName || acct?.preferredDisplayName || 'Epic User';
+                    const currentGame = pres?.connections?.default?.productId || null;
+                    (friendsOnline as any[]).push({
+                      id: fid,
+                      username: displayName,
+                      avatar: null,
+                      online_status: pres?.status === 'online' ? 'online' : (presenceMap.size === 0 ? 'online' : pres?.status || 'online'),
+                      current_game: currentGame,
+                      platform: 'epic',
+                    });
+                  }
+                }
+              }
+            }
+          }
+        } catch (e) { console.error("Failed to fetch Epic friends:", e); }
+      }
+
+      // Update cache with fresh raw items; fall back to stale cache if fresh fetch returned nothing
+      if (!activityCacheFresh) {
+        if (allFriendActivities.length > 0) {
+          friendsActivityCache.set(userId, { items: allFriendActivities, timestamp: Date.now() });
+        } else if (activityCached?.items.length) {
+          // APIs returned nothing (transient failure) — keep using stale cache rather than showing empty
+          allFriendActivities = activityCached.items;
+        }
       }
       const rawActivityItems: any[] = activityCacheFresh ? activityCached!.items : allFriendActivities;
 
@@ -6227,12 +6672,37 @@ async function getIgdbToken() {
         return (a.username || '').localeCompare(b.username || '');
       });
 
+      // Discord guild presence — pull from Gateway cache for the user's linked guild
+      const discordFriends: any[] = [];
+      if ((user as any).discord_guild_id && discordPresenceCache.has((user as any).discord_guild_id)) {
+        const guildCache = discordPresenceCache.get((user as any).discord_guild_id)!;
+        for (const entry of guildCache.values()) {
+          if (entry.status === 'offline') continue;
+          discordFriends.push({
+            id: entry.userId,
+            username: entry.displayName,
+            avatar: entry.avatar,
+            online_status: entry.status,
+            current_game: entry.currentGame,
+            platform: 'discord',
+          });
+        }
+        // Sort online first, then idle, then by name
+        const statusOrder: Record<string, number> = { online: 0, dnd: 1, idle: 2 };
+        discordFriends.sort((a, b) => {
+          const sa = statusOrder[a.online_status] ?? 3;
+          const sb = statusOrder[b.online_status] ?? 3;
+          return sa !== sb ? sa - sb : (a.username || '').localeCompare(b.username || '');
+        });
+      }
+
       // Split into platform buckets expected by frontend
       const friendsOnlineSplit = {
-        steam: (friendsOnline).filter(f => f.platform === 'steam'),
-        xbox: (friendsOnline).filter(f => f.platform === 'xbox'),
-        discord: (friendsOnline).filter(f => f.platform === 'discord'),
-        app: (friendsOnline).filter(f => f.platform === 'app'),
+        steam: (friendsOnline as any[]).filter(f => f.platform === 'steam'),
+        xbox: (friendsOnline as any[]).filter(f => f.platform === 'xbox'),
+        epic: (friendsOnline as any[]).filter(f => f.platform === 'epic'),
+        discord: discordFriends,
+        app: (friendsOnline as any[]).filter(f => f.platform === 'app'),
       };
 
       // 2.2 Recent Achievements — parse all games' achievement JSON, filter unlocked, sort by unlockTime desc
@@ -6270,19 +6740,68 @@ async function getIgdbToken() {
         .sort((a: any, b: any) => b.unlockTime - a.unlockTime)
         .slice(0, 10);
 
-      // 3. Suggested from Log (QuestLog)
-      const suggestedLog = db.prepare(`
-        SELECT * FROM games 
-        WHERE user_id = ? AND status = 'to-play'
-        ORDER BY RANDOM() LIMIT 5
-      `).all(userId);
+      // 3. Tag-based suggestions — build frequency map from recently played
+      const recentPlayedIds = new Set(recentlyPlayed.map((g: any) => g.id));
+      const recentTagFreq = new Map<string, number>();
+      for (const rg of recentlyPlayed) {
+        const parts = [
+          ...((rg as any).tags || '').split(',').map((t: string) => t.trim()),
+          ...((rg as any).genre ? [(rg as any).genre.trim()] : []),
+        ].filter(Boolean);
+        for (const t of parts) {
+          const key = t.toLowerCase();
+          recentTagFreq.set(key, (recentTagFreq.get(key) || 0) + 1);
+        }
+      }
 
-      // 3.1 Suggested from Library (exclude hidden)
-      const suggestedLibrary = db.prepare(`
-        SELECT * FROM launcher_games
-        WHERE user_id = ? AND (hidden IS NULL OR hidden != 1)
-        ORDER BY RANDOM() LIMIT 5
-      `).all(userId);
+      function scoreGameTags(game: any): { score: number; matchedTags: string[] } {
+        const parts = [
+          ...(game.tags || '').split(',').map((t: string) => t.trim()),
+          ...(game.genre ? [game.genre.trim()] : []),
+        ].filter(Boolean);
+        const matched: string[] = [];
+        let score = 0;
+        for (const t of parts) {
+          const freq = recentTagFreq.get(t.toLowerCase());
+          if (freq) { score += freq; matched.push(t); }
+        }
+        return { score, matchedTags: [...new Set(matched)].slice(0, 3) };
+      }
+
+      // 3. Suggested from Log (QuestLog) — tag-scored, fallback to random
+      const logCandidates = db.prepare(`
+        SELECT * FROM games WHERE user_id = ? AND status = 'to-play'
+      `).all(userId) as any[];
+      let suggestedLog: any[] = logCandidates
+        .map((g: any) => { const { score, matchedTags } = scoreGameTags(g); return { ...g, _score: score, matchedTags }; })
+        .filter((g: any) => g._score > 0)
+        .sort((a: any, b: any) => b._score - a._score)
+        .slice(0, 8);
+      if (suggestedLog.length === 0) {
+        suggestedLog = logCandidates.sort(() => Math.random() - 0.5).slice(0, 5).map((g: any) => ({ ...g, matchedTags: [] }));
+      }
+
+      // 3.1 Suggested from Library — tag-scored, exclude recently played, fallback to random
+      const libCandidates = db.prepare(`
+        SELECT * FROM launcher_games WHERE user_id = ? AND (hidden IS NULL OR hidden != 1)
+      `).all(userId) as any[];
+      let suggestedLibrary: any[] = libCandidates
+        .filter((g: any) => !recentPlayedIds.has(g.id))
+        .map((g: any) => { const { score, matchedTags } = scoreGameTags(g); return { ...g, _score: score, matchedTags }; })
+        .filter((g: any) => g._score > 0)
+        .sort((a: any, b: any) => b._score - a._score)
+        .slice(0, 8);
+      if (suggestedLibrary.length === 0) {
+        suggestedLibrary = libCandidates
+          .filter((g: any) => !recentPlayedIds.has(g.id))
+          .sort(() => Math.random() - 0.5).slice(0, 5).map((g: any) => ({ ...g, matchedTags: [], _score: 0 }));
+      }
+
+      // Merge library + log into one ranked "Picked for You" list
+      const pickedForYou = [
+        ...suggestedLibrary.slice(0, 6).map((g: any) => ({ ...g, _source: 'library' })),
+        ...suggestedLog.slice(0, 6).map((g: any) => ({ ...g, _source: 'log' })),
+      ].sort((a: any, b: any) => b._score - a._score).slice(0, 10);
 
       // 4. Stats & History
       const stats = {
@@ -6347,13 +6866,16 @@ async function getIgdbToken() {
         friendsActivity: (req as any)._friendsActivity || [],
         sharedLogActivity: friendsActivity,
         recentAchievements: formattedAchievements,
-        suggestedLog,
-        suggestedLibrary,
+        pickedForYou,
         suggestions,
         history,
         updates,
         discordGuildId: (user)?.discord_guild_id || null,
+        discordGuildName: (user)?.discord_guild_name || null,
+        discordGuildIcon: (user)?.discord_guild_icon || null,
         discordLinked: !!(user)?.discord_id,
+        discordClientId: process.env.DISCORD_CLIENT_ID || null,
+        discordGuildCached: (user)?.discord_guild_id ? discordPresenceCache.has((user as any).discord_guild_id) : false,
         stats: {
           backlogCount: stats.totalBacklog?.count || 0,
           libraryCount: stats.totalLibrary?.count || 0,
@@ -6667,6 +7189,19 @@ async function getIgdbToken() {
   app.delete("/api/friends/:userId", authenticateToken, (req, res) => {
     db.prepare("DELETE FROM friendships WHERE (requester_id = ? AND addressee_id = ?) OR (requester_id = ? AND addressee_id = ?)").run(req.user.id, req.params.userId, req.params.userId, req.user.id);
     res.json({ ok: true });
+  });
+
+  // Get a friend's recently played games with progress data
+  app.get("/api/friends/:userId/progress", authenticateToken, (req: any, res: any) => {
+    const isFriend = db.prepare("SELECT 1 FROM friendships WHERE requester_id = ? AND addressee_id = ?").get(req.user.id, req.params.userId);
+    if (!isFriend) return res.status(403).json({ error: "Not friends" });
+    const games = db.prepare(`
+      SELECT title, artwork, playtime, achievements, hltb_main, last_played, genre, tags
+      FROM launcher_games
+      WHERE user_id = ? AND playtime > 0
+      ORDER BY last_played DESC LIMIT 10
+    `).all(parseInt(req.params.userId));
+    res.json(games);
   });
 
   // Get a friend's recent game additions (backlog)

@@ -23,4 +23,5 @@ export interface Game {
   isFixingArtwork?: boolean;
   artworkFailed?: boolean;
   hasAttemptedFix?: boolean;
+  matchedTags?: string[];
 }

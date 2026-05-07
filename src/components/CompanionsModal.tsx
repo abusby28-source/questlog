@@ -2,8 +2,31 @@ import React from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   X, Search, Users, UserPlus, UserMinus, MessageCircle, Send,
-  ChevronDown, Camera, Gamepad2, Calendar, Clock, Library, Plus,
+  ChevronDown, Camera, Gamepad2, Calendar, Clock, Library, Plus, CheckCircle2, Link as LinkIcon, ExternalLink,
 } from 'lucide-react';
+
+const SteamIcon = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 65 65" fill="currentColor" className={className}>
+    <path d="M30.31 23.985l.003.158-7.83 11.375c-1.268-.058-2.54.165-3.748.662a8.14 8.14 0 0 0-1.498.8L.042 29.893s-.398 6.546 1.26 11.424l12.156 5.016c.6 2.728 2.48 5.12 5.242 6.27a8.88 8.88 0 0 0 11.603-4.782 8.89 8.89 0 0 0 .684-3.656L42.18 36.16l.275.005c6.705 0 12.155-5.466 12.155-12.18s-5.44-12.16-12.155-12.174c-6.702 0-12.155 5.46-12.155 12.174zm-1.88 23.05c-1.454 3.5-5.466 5.147-8.953 3.694a6.84 6.84 0 0 1-3.524-3.362l3.957 1.64a5.04 5.04 0 0 0 6.591-2.719 5.05 5.05 0 0 0-2.715-6.601l-4.1-1.695c1.578-.6 3.372-.62 5.05.077 1.7.703 3 2.027 3.696 3.72s.692 3.56-.01 5.246M42.466 32.1a8.12 8.12 0 0 1-8.098-8.113 8.12 8.12 0 0 1 8.098-8.111 8.12 8.12 0 0 1 8.1 8.111 8.12 8.12 0 0 1-8.1 8.113m-6.068-8.126a6.09 6.09 0 0 1 6.08-6.095c3.355 0 6.084 2.73 6.084 6.095a6.09 6.09 0 0 1-6.084 6.093 6.09 6.09 0 0 1-6.081-6.093z"/>
+  </svg>
+);
+const XboxIcon = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 372.36823 372.57281" fill="currentColor" className={className}>
+    <g transform="translate(-1.5706619,12.357467)">
+      <path d="M 169.18811,359.44924 C 140.50497,356.70211 111.4651,346.40125 86.518706,330.1252 65.614374,316.48637 60.893704,310.87967 60.893704,299.69061 c 0,-22.47524 24.711915,-61.84014 66.992496,-106.71584 24.01246,-25.48631 57.46022,-55.36001 61.0775,-54.55105 7.0309,1.57238 63.25048,56.41053 84.29655,82.2252 33.28077,40.82148 48.58095,74.24535 40.808,89.14682 -5.9087,11.32753 -42.57224,33.4669 -69.50775,41.97242 -22.19984,7.01011 -51.35538,9.9813 -75.37239,7.68108 z M 32.660004,276.3228 C 15.288964,249.67326 6.5125436,223.43712 2.2752336,185.49086 c -1.39917002,-12.53 -0.89778,-19.69701 3.17715,-45.41515 5.0788204,-32.05404 23.3330104,-69.136381 45.2671304,-91.957616 9.34191,-9.719732 10.17624,-9.956543 21.56341,-6.120482 13.828357,4.658436 28.595936,14.857457 51.498366,35.56661 l 13.36254,12.082873 -7.2969,8.96431 C 95.97448,140.22403 60.217254,199.2085 46.741444,235.70071 c -7.32599,19.83862 -10.28084,39.75281 -7.12868,48.04363 2.12818,5.59752 0.17339,3.51093 -6.95276,-7.42154 z m 304.915426,4.53255 c 1.71605,-8.37719 -0.4544,-23.76257 -5.5413,-39.28002 -11.01667,-33.60598 -47.83964,-96.12421 -81.65282,-138.63054 L 239.73699,89.563875 251.25285,78.989784 c 15.03631,-13.806637 25.47602,-22.073835 36.74025,-29.094513 8.88881,-5.540156 21.59109,-10.444558 27.05113,-10.444558 3.36626,0 15.21723,12.298726 24.78421,25.720611 14.81725,20.787711 25.71782,45.986976 31.24045,72.219686 3.56833,16.9498 3.8657,53.23126 0.57486,70.13935 -2.70068,13.87582 -8.40314,31.87484 -13.9661,44.08195 -4.16823,9.14657 -14.53521,26.91044 -19.0783,32.69074 -2.33569,2.97175 -2.33761,2.96527 -1.02393,-3.4477 z M 172.25917,33.104812 c -15.60147,-7.922671 -39.6696,-16.427164 -52.96493,-18.715209 -4.66097,-0.802124 -12.61193,-1.249474 -17.6688,-0.994114 -10.969613,.55394 -10.479662,-0.0197 7.11783,-8.3336652 14.63023,-6.912081 26.83386,-10.976696 43.40044,-14.455218 18.6362,-3.9130858 53.66559,-3.9590088 72.00507,-0.0944 19.80818,4.174105 43.13297,12.854085 56.27623,20.9423862 l 3.90633,2.403927 -8.96247,-0.452584 c -17.81002,-0.899366 -43.76575,6.295879 -71.63269,19.857459 -8.40538,4.090523 -15.71788,7.357511 -16.25,7.25997 -0.53211,-0.09754 -7.38426,-3.43589 -15.22701,-7.418555 z"/>
+    </g>
+  </svg>
+);
+const DiscordIcon = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 127.14 96.36" fill="currentColor" className={className}>
+    <path d="M107.7,8.07A105.15,105.15,0,0,0,81.47,0a72.06,72.06,0,0,0-3.36,6.83A97.68,97.68,0,0,0,49,6.83,72.37,72.37,0,0,0,45.64,0,105.89,105.89,0,0,0,19.39,8.09C2.79,32.65-1.71,56.6.54,80.21h0A105.73,105.73,0,0,0,32.71,96.36,77.7,77.7,0,0,0,39.6,85.25a68.42,68.42,0,0,1-10.85-5.18c.91-.66,1.8-1.34,2.66-2a75.57,75.57,0,0,0,64.32,0c.87.71,1.76,1.39,2.66,2a68.68,68.68,0,0,1-10.87,5.19,77,77,0,0,0,6.89,11.1A105.25,105.25,0,0,0,126.6,80.22h0C129.24,52.84,122.09,29.11,107.7,8.07ZM42.45,65.69C36.18,65.69,31,60,31,53s5-12.74,11.43-12.74S54,46,53.89,53,48.84,65.69,42.45,65.69Zm42.24,0C78.41,65.69,73.25,60,73.25,53s5-12.74,11.44-12.74S96.23,46,96.12,53,91.08,65.69,84.69,65.69Z"/>
+  </svg>
+);
+const EpicIcon = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="currentColor" className={className}>
+    <path d="M3 0v18l3.5 2V4h11V2H3zm4 4v18l3.5-2V6h7V4H7zm4 4v10l9.5-5-9.5-5z"/>
+  </svg>
+);
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 function cn(...inputs: ClassValue[]) { return twMerge(clsx(inputs)); }
@@ -98,6 +121,10 @@ interface CompanionsModalProps {
   setSessionMessage: (v: string) => void;
   setExpandedFriend: (v: any) => void;
   markMessagesRead: (friendId: number) => void;
+  handleLinkProfile: (platform: string) => void;
+  handleSyncXbox: () => void;
+  handleSyncEpic: () => void;
+  setShowSteamLinkModal: (v: boolean) => void;
 }
 
 export default function CompanionsModal(props: CompanionsModalProps) {
@@ -116,6 +143,7 @@ export default function CompanionsModal(props: CompanionsModalProps) {
     handleLogout, saveAvatar, saveSettings, sendConvoMessage, sendGroupMessage,
     addToCalendar, setSessionModal, setSessionDateTime, setSessionMessage,
     setExpandedFriend, markMessagesRead,
+    handleLinkProfile, handleSyncXbox, handleSyncEpic, setShowSteamLinkModal,
   } = props;
 
   return (
@@ -447,6 +475,33 @@ export default function CompanionsModal(props: CompanionsModalProps) {
                               </div>
                             );
                           }
+                          const gameShareMatch = msg.content?.startsWith('[GAME_SHARE]');
+                          if (gameShareMatch) {
+                            let share: any = {};
+                            try { share = JSON.parse(msg.content.slice('[GAME_SHARE]'.length)); } catch {}
+                            return (
+                              <div key={msg.id} className={`flex flex-col max-w-[80%] ${isMe ? 'items-end self-end' : 'items-start'}`}>
+                                {!isMe && <span className="text-[10px] font-bold text-white/40 mb-1 px-1">{msg.sender_username}</span>}
+                                <div
+                                  className="bg-indigo-950/60 border border-indigo-500/25 rounded-2xl rounded-bl-sm overflow-hidden cursor-pointer hover:border-indigo-400/40 transition-colors w-52"
+                                  onClick={() => share.title && handleDiscoverGameClick({ _external: true, id: share.steamAppId || share.title, title: share.title, artwork: share.artwork || '', verticalArt: share.artwork, banner: share.steamAppId ? `https://cdn.akamai.steamstatic.com/steam/apps/${share.steamAppId}/library_hero.jpg` : undefined, steamAppID: share.steamAppId || undefined } as any)}
+                                >
+                                  {share.artwork && (
+                                    <img src={share.artwork} alt={share.title} className="w-full h-24 object-cover" referrerPolicy="no-referrer"/>
+                                  )}
+                                  <div className="p-2.5 space-y-1.5">
+                                    <div className="flex items-center gap-1.5">
+                                      <ExternalLink size={10} className="text-indigo-400 shrink-0"/>
+                                      <span className="text-[10px] font-black uppercase tracking-widest text-indigo-400">Check this out</span>
+                                    </div>
+                                    <p className="font-bold italic font-serif tracking-tighter uppercase text-white text-sm leading-tight">{share.title}</p>
+                                    {share.message && <p className="text-[10px] text-white/40 italic">"{share.message}"</p>}
+                                  </div>
+                                </div>
+                                <span className="text-[9px] text-white/20 mt-1 px-1">{new Date(msg.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</span>
+                              </div>
+                            );
+                          }
                           if (sessionInviteMatch) {
                             let invite: any = {};
                             try { invite = JSON.parse(msg.content.slice('[SESSION_INVITE]'.length)); } catch {}
@@ -585,6 +640,32 @@ export default function CompanionsModal(props: CompanionsModalProps) {
                       className="w-full py-2.5 rounded-2xl bg-emerald-600 text-white text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-500 transition-colors disabled:opacity-30 cursor-pointer mt-1">
                       Change Password
                     </button>
+                  </div>
+                </div>
+
+                {/* Connected Accounts */}
+                <div className="p-5 rounded-3xl bg-white/[0.03] border border-white/[0.08]">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-4 flex items-center gap-2">
+                    <LinkIcon size={10}/> Connected Accounts
+                  </p>
+                  <div className="space-y-1">
+                    {[
+                      { label: 'Steam', icon: <SteamIcon className="w-4 h-4 text-[#1b9fe0]"/>, connected: !!user?.steam_id, onConnect: () => setShowSteamLinkModal(true) },
+                      { label: 'Xbox', icon: <XboxIcon className="w-4 h-4 text-[#107c10]"/>, connected: !!user?.xbox_id, onConnect: handleSyncXbox },
+                      { label: 'Discord', icon: <DiscordIcon className="w-4 h-4 text-[#5865F2]"/>, connected: !!user?.discord_id, onConnect: () => handleLinkProfile('discord') },
+                      { label: 'Epic Games', icon: <EpicIcon className="w-4 h-4 text-white/70"/>, connected: !!user?.epic_account_id, onConnect: handleSyncEpic },
+                    ].map(({ label, icon, connected, onConnect }) => (
+                      <div key={label} className={cn("flex items-center justify-between py-2.5 px-1 rounded-xl transition-colors", !connected && "cursor-pointer hover:bg-white/5")} onClick={() => !connected && onConnect()}>
+                        <div className="flex items-center gap-3">
+                          {icon}
+                          <span className="text-sm font-semibold">{label}</span>
+                        </div>
+                        {connected
+                          ? <CheckCircle2 size={15} className="text-emerald-400"/>
+                          : <span className="text-[10px] font-bold uppercase tracking-widest text-white/25 hover:text-white/50 transition-colors">Connect</span>
+                        }
+                      </div>
+                    ))}
                   </div>
                 </div>
 

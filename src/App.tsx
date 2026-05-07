@@ -1290,6 +1290,7 @@ export default function App() {
   const [showXboxSync, setShowXboxSync] = useState(false);
   const [showEaSync, setShowEaSync] = useState(false);
   const [showEpicSync, setShowEpicSync] = useState(false);
+  const [isSyncingHltb, setIsSyncingHltb] = useState(false);
   const [launcherPlatformFilter, setLauncherPlatformFilter] = useState<'all' | 'steam' | 'xbox' | 'ea' | 'epic'>('all');
   const [openPlatformSettings, setOpenPlatformSettings] = useState<string | null>(null);
   const [showSteamLinkModal, setShowSteamLinkModal] = useState(false);
@@ -2645,6 +2646,26 @@ export default function App() {
       setSyncMessage({ title: 'EA Sync Failed', message: 'Could not reach server.', type: 'error' });
     } finally {
       setIsSyncing(false);
+    }
+  };
+
+  const handleSyncHltb = async () => {
+    setIsSyncingHltb(true);
+    setSyncNotif({ type: 'info', message: 'Syncing HowLongToBeat data for all games…' });
+    try {
+      const res = await fetch('/api/sync-hltb', { method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } });
+      const data = await res.json();
+      setSyncNotif({ type: 'info', message: `HLTB sync started for ${data.queued} games. Data will appear as games are processed.` });
+      // Poll until done — reload launcher games every 10s for 2 minutes
+      let elapsed = 0;
+      const poll = setInterval(async () => {
+        elapsed += 10000;
+        await fetchLauncherGames();
+        if (elapsed >= 120000) { clearInterval(poll); setIsSyncingHltb(false); setSyncNotif({ type: 'success', message: 'HLTB sync complete!' }); }
+      }, 10000);
+    } catch {
+      setSyncNotif({ type: 'error', message: 'HLTB sync failed' });
+      setIsSyncingHltb(false);
     }
   };
 
@@ -6373,6 +6394,22 @@ export default function App() {
                         </motion.div>
                       )}
                     </AnimatePresence>
+                  </div>
+
+                  {/* HLTB sync */}
+                  <div className="flex items-center justify-between px-1">
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-lg flex items-center justify-center text-sm font-black" style={{ background: 'linear-gradient(135deg,#6366f1,#8b5cf6)' }}>⏱</div>
+                      <div>
+                        <p className="text-sm font-bold text-white/90">HowLongToBeat</p>
+                        <p className="text-[10px] text-white/40">Sync completion data for all games</p>
+                      </div>
+                    </div>
+                    <button onClick={handleSyncHltb} disabled={isSyncingHltb}
+                      className="shrink-0 px-5 py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-all disabled:opacity-50"
+                      style={{ background: 'linear-gradient(135deg,#6366f1,#8b5cf6)', color: 'white' }}>
+                      {isSyncingHltb ? <Loader2 className="animate-spin" size={14}/> : 'Sync HLTB'}
+                    </button>
                   </div>
 
                   <div className="flex items-center gap-4">

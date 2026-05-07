@@ -1353,77 +1353,96 @@ function hltbLevenshtein(s: string, t: string): number {
   return d[m][n];
 }
 
+// Normalize title for better HLTB matching: strip trademarks, edition suffixes, punctuation
+function cleanTitleForHltb(title: string): string {
+  return title
+    .replace(/[™®]/g, '')
+    .replace(/\s*[:–—]\s*(Emperor|Complete|Definitive|Game of the Year|GOTY|Special|Enhanced|Remastered|Ultimate|Anniversary|Gold|Deluxe|Legendary|Director's Cut|Extended|Premium)\s*(Edition|Cut|Version)?$/i, '')
+    .replace(/\s*(Edition|Version)$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function hltbSearch(searchTitle: string, auth: { token: string; hpKey: string; hpVal: string }): Promise<any[]> {
+  const body: any = {
+    searchType: 'games',
+    searchTerms: searchTitle.split(' ').filter(Boolean),
+    searchPage: 1,
+    size: 20,
+    searchOptions: {
+      games: {
+        userId: 0, platform: '', sortCategory: 'popular', rangeCategory: 'main',
+        rangeTime: { min: 0, max: 0 },
+        gameplay: { perspective: '', flow: '', genre: '', difficulty: '' },
+        rangeYear: { min: '', max: '' },
+        modifier: '',
+      },
+      users: { sortCategory: 'postcount' },
+      lists: { sortCategory: 'follows' },
+      filter: '', sort: 0, randomizer: 0,
+    },
+    useCache: true,
+  };
+  if (auth.hpKey) body[auth.hpKey] = auth.hpVal;
+
+  const res = await fetch(`${HLTB_BASE}/api/bleed`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Accept': 'application/json, text/javascript, */*; q=0.01',
+      'User-Agent': HLTB_UA,
+      'Origin': HLTB_BASE,
+      'Referer': HLTB_BASE,
+      'x-auth-token': auth.token,
+      'x-hp-key': auth.hpKey ?? '',
+      'x-hp-val': auth.hpVal ?? '',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) hltbAuth = null;
+    return [];
+  }
+  const data = await res.json() as any;
+  return data?.data ?? [];
+}
+
+function bestHltbMatch(results: any[], targetTitle: string): any | null {
+  const target = targetTitle.toLowerCase().trim();
+  const scored = results
+    .map((r: any) => {
+      const name = (r.game_name || '').toLowerCase().trim();
+      const longer = name.length >= target.length ? name : target;
+      const shorter = name.length < target.length ? name : target;
+      const dist = hltbLevenshtein(longer, shorter);
+      return { r, similarity: (longer.length - dist) / longer.length };
+    })
+    .sort((a, b) => b.similarity - a.similarity);
+  return scored.length && scored[0].similarity >= 0.3 ? scored[0].r : null;
+}
+
 async function fetchHltbHours(title: string): Promise<number | null> {
   try {
     const auth = await getHltbAuth();
     if (!auth) return null;
 
-    const body: any = {
-      searchType: 'games',
-      searchTerms: title.split(' '),
-      searchPage: 1,
-      size: 20,
-      searchOptions: {
-        games: {
-          userId: 0,
-          platform: '',
-          sortCategory: 'popular',
-          rangeCategory: 'main',
-          rangeTime: { min: 0, max: 0 },
-          gameplay: { perspective: '', flow: '', genre: '', difficulty: '' },
-          rangeYear: { min: '', max: '' },
-          modifier: '',
-        },
-        users: { sortCategory: 'postcount' },
-        lists: { sortCategory: 'follows' },
-        filter: '',
-        sort: 0,
-        randomizer: 0,
-      },
-      useCache: true,
-    };
-    // Inject the dynamic hp key/value into the body (as Playnite plugin does)
-    if (auth.hpKey) body[auth.hpKey] = auth.hpVal;
+    // Try with cleaned title first, fall back to original
+    const cleaned = cleanTitleForHltb(title);
+    const searchTitles = cleaned !== title ? [cleaned, title] : [title];
 
-    const res = await fetch(`${HLTB_BASE}/api/bleed`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'User-Agent': HLTB_UA,
-        'Origin': HLTB_BASE,
-        'Referer': HLTB_BASE,
-        'x-auth-token': auth.token,
-        'x-hp-key': auth.hpKey ?? '',
-        'x-hp-val': auth.hpVal ?? '',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      if (res.status === 401 || res.status === 403) hltbAuth = null; // force re-auth
-      return null;
+    let best: any = null;
+    for (const searchTitle of searchTitles) {
+      const results = await hltbSearch(searchTitle, auth);
+      // Try matching against both the search title and cleaned title
+      best = bestHltbMatch(results, cleaned) ?? bestHltbMatch(results, title);
+      if (best) break;
+      if (searchTitles.indexOf(searchTitle) < searchTitles.length - 1) {
+        await new Promise(r => setTimeout(r, 600)); // small delay between retries
+      }
     }
 
-    const data = await res.json() as any;
-    const results: any[] = data?.data ?? [];
-    if (!results.length) return null;
-
-    // Pick best match by Levenshtein similarity to the searched title
-    const titleLower = title.toLowerCase().trim();
-    const scored = results
-      .filter((r: any) => r.game_type === 'game' || !r.game_type) // skip DLC entries
-      .map((r: any) => {
-        const name = (r.game_name || '').toLowerCase().trim();
-        const longer = name.length >= titleLower.length ? name : titleLower;
-        const shorter = name.length < titleLower.length ? name : titleLower;
-        const dist = hltbLevenshtein(longer, shorter);
-        return { r, similarity: (longer.length - dist) / longer.length };
-      })
-      .sort((a, b) => b.similarity - a.similarity);
-
-    if (!scored.length || scored[0].similarity < 0.4) return null;
-    const best = scored[0].r;
+    if (!best) return null;
 
     // comp_main / comp_plus / comp_100 are all in seconds
     const secs = best.comp_main > 0 ? best.comp_main
@@ -1436,6 +1455,38 @@ async function fetchHltbHours(title: string): Promise<number | null> {
     return null;
   }
 }
+
+  // Force re-sync HLTB data for all library games (resets failed -1 sentinels too)
+  app.post("/api/sync-hltb", authenticateToken, async (req: any, res) => {
+    const userId = req.user.id;
+    // Reset -1 sentinels so they get retried
+    db.prepare("UPDATE launcher_games SET hltb_main = NULL WHERE user_id = ? AND hltb_main = -1").run(userId);
+    const pending = db.prepare(
+      "SELECT id, title FROM launcher_games WHERE user_id = ? AND playtime > 0 AND hltb_main IS NULL ORDER BY last_played DESC"
+    ).all(userId) as { id: number; title: string }[];
+    res.json({ queued: pending.length });
+    // Run in background
+    (async () => {
+      let synced = 0;
+      for (const game of pending) {
+        try {
+          const hours = await fetchHltbHours(game.title);
+          if (hours !== null) {
+            db.prepare("UPDATE launcher_games SET hltb_main = ? WHERE id = ?").run(hours, game.id);
+            console.log(`[HLTB sync] ${game.title} → ${hours}h`);
+            synced++;
+          } else {
+            db.prepare("UPDATE launcher_games SET hltb_main = -1 WHERE id = ?").run(game.id);
+            console.log(`[HLTB sync] ${game.title} → not found`);
+          }
+        } catch (e) {
+          console.error(`[HLTB sync] Failed for ${game.title}:`, e);
+        }
+        await new Promise(r => setTimeout(r, 1200));
+      }
+      console.log(`[HLTB sync] Done: ${synced}/${pending.length} synced`);
+    })();
+  });
 
   app.get("/api/igdb/search", async (req, res) => {
     try {
